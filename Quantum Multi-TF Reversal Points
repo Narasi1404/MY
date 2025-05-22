@@ -1,0 +1,409 @@
+//+------------------------------------------------------------------+
+//|                          Quantum Multi-TF Reversal Points.mq5 |
+//|                                  Copyright 2025, Trader Author |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025, Trader Author"
+#property link      "https://www.mql5.com"
+#property version   "1.00"
+#property description "Quantum Multi-Timeframe Reversal Points Indicator"
+#property description "Detects reversal points across multiple timeframes using advanced algorithms"
+#property indicator_chart_window
+#property indicator_buffers 4
+#property indicator_plots   4
+
+// Arrow indicators
+#property indicator_label1  "Bullish Reversal"
+#property indicator_type1   DRAW_ARROW
+#property indicator_color1  clrLime
+#property indicator_style1  STYLE_SOLID
+#property indicator_width1  3
+
+#property indicator_label2  "Bearish Reversal"
+#property indicator_type2   DRAW_ARROW
+#property indicator_color2  clrRed
+#property indicator_style2  STYLE_SOLID
+#property indicator_width2  3
+
+#property indicator_label3  "Strong Bullish Reversal"
+#property indicator_type3   DRAW_ARROW
+#property indicator_color3  clrAqua
+#property indicator_style3  STYLE_SOLID
+#property indicator_width3  5
+
+#property indicator_label4  "Strong Bearish Reversal"
+#property indicator_type4   DRAW_ARROW
+#property indicator_color4  clrMagenta
+#property indicator_style4  STYLE_SOLID
+#property indicator_width4  5
+
+// Input parameters
+input int     LookbackPeriod = 14;       // Lookback period for pattern detection
+input int     Sensitivity = 5;           // Sensitivity (1-10)
+input bool    UseQuantumFilter = true;   // Use quantum-inspired filtering
+input bool    UseVolume = true;          // Consider volume in calculations
+input double  MinStrength = 3.0;         // Minimum strength threshold for signals
+input double  StrongSignalMultiplier = 2.0; // Multiplier for strong signals
+
+// Additional timeframes to analyze
+input bool    UseM5 = true;     // Use M5 timeframe
+input bool    UseM15 = true;    // Use M15 timeframe
+input bool    UseH1 = true;     // Use H1 timeframe
+input bool    UseH4 = true;     // Use H4 timeframe
+input bool    UseD1 = true;     // Use D1 timeframe
+
+// Arrow codes
+const int ARROW_BUY = 233;
+const int ARROW_SELL = 234;
+const int ARROW_STRONG_BUY = 241;
+const int ARROW_STRONG_SELL = 242;
+
+// Indicator buffers
+double BullishBuffer[];
+double BearishBuffer[];
+double StrongBullishBuffer[];
+double StrongBearishBuffer[];
+
+// Additional buffers for calculations
+double HighBuffer[];
+double LowBuffer[];
+double CloseBuffer[];
+double OpenBuffer[];
+double VolumeBuffer[];
+double SignalStrength[];
+
+// Timeframe arrays
+ENUM_TIMEFRAMES Timeframes[];
+bool UseTimeframes[];
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   // Set arrow codes
+   PlotIndexSetInteger(0, PLOT_ARROW, ARROW_BUY);
+   PlotIndexSetInteger(1, PLOT_ARROW, ARROW_SELL);
+   PlotIndexSetInteger(2, PLOT_ARROW, ARROW_STRONG_BUY);
+   PlotIndexSetInteger(3, PLOT_ARROW, ARROW_STRONG_SELL);
+   
+   // Set buffer indexes
+   SetIndexBuffer(0, BullishBuffer, INDICATOR_DATA);
+   SetIndexBuffer(1, BearishBuffer, INDICATOR_DATA);
+   SetIndexBuffer(2, StrongBullishBuffer, INDICATOR_DATA);
+   SetIndexBuffer(3, StrongBearishBuffer, INDICATOR_DATA);
+   
+   // Initialize buffers with empty values
+   ArrayInitialize(BullishBuffer, EMPTY_VALUE);
+   ArrayInitialize(BearishBuffer, EMPTY_VALUE);
+   ArrayInitialize(StrongBullishBuffer, EMPTY_VALUE);
+   ArrayInitialize(StrongBearishBuffer, EMPTY_VALUE);
+   
+   // Set up timeframes
+   int timeframeCount = 0;
+   if(UseM5) timeframeCount++;
+   if(UseM15) timeframeCount++;
+   if(UseH1) timeframeCount++;
+   if(UseH4) timeframeCount++;
+   if(UseD1) timeframeCount++;
+   
+   ArrayResize(Timeframes, timeframeCount);
+   ArrayResize(UseTimeframes, timeframeCount);
+   
+   int index = 0;
+   if(UseM5) { Timeframes[index] = PERIOD_M5; UseTimeframes[index] = true; index++; }
+   if(UseM15) { Timeframes[index] = PERIOD_M15; UseTimeframes[index] = true; index++; }
+   if(UseH1) { Timeframes[index] = PERIOD_H1; UseTimeframes[index] = true; index++; }
+   if(UseH4) { Timeframes[index] = PERIOD_H4; UseTimeframes[index] = true; index++; }
+   if(UseD1) { Timeframes[index] = PERIOD_D1; UseTimeframes[index] = true; index++; }
+   
+   // Set indicator name and shortname
+   IndicatorSetString(INDICATOR_SHORTNAME, "Quantum Multi-TF Reversal Points");
+   
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+   // Check for minimum required bars
+   if(rates_total < LookbackPeriod + 3)
+      return(0);
+   
+   // Calculate from this bar
+   int start;
+   if(prev_calculated == 0)
+      start = LookbackPeriod;
+   else
+      start = prev_calculated - 1;
+   
+   // Resize local buffers
+   ArrayResize(HighBuffer, rates_total);
+   ArrayResize(LowBuffer, rates_total);
+   ArrayResize(CloseBuffer, rates_total);
+   ArrayResize(OpenBuffer, rates_total);
+   ArrayResize(VolumeBuffer, rates_total);
+   ArrayResize(SignalStrength, rates_total);
+   
+   // Copy price data
+   for(int i = start; i < rates_total; i++)
+   {
+      HighBuffer[i] = high[i];
+      LowBuffer[i] = low[i];
+      CloseBuffer[i] = close[i];
+      OpenBuffer[i] = open[i];
+      VolumeBuffer[i] = (double)tick_volume[i];
+      SignalStrength[i] = 0;
+      
+      // Reset signal buffers
+      BullishBuffer[i] = EMPTY_VALUE;
+      BearishBuffer[i] = EMPTY_VALUE;
+      StrongBullishBuffer[i] = EMPTY_VALUE;
+      StrongBearishBuffer[i] = EMPTY_VALUE;
+      
+      // Only process completed bars
+      if(i < rates_total - 1)
+      {
+         // Calculate reversal points based on main timeframe
+         double currentStrength = CalculateSignalStrength(i, open, high, low, close, tick_volume, rates_total);
+         
+         // Multi-timeframe confirmation
+         double mtfConfirmation = GetMultiTimeframeConfirmation(time[i], currentStrength > 0);
+         
+         // Apply quantum filter if enabled
+         if(UseQuantumFilter)
+            currentStrength = ApplyQuantumFilter(currentStrength, i, close);
+         
+         // Consider MTF confirmation in the final strength
+         currentStrength *= (1.0 + 0.2 * mtfConfirmation);
+         
+         SignalStrength[i] = currentStrength;
+         
+         // Generate signals based on strength and direction
+         if(MathAbs(currentStrength) >= MinStrength)
+         {
+            if(currentStrength > 0)  // Bullish signal
+            {
+               if(currentStrength >= MinStrength * StrongSignalMultiplier)
+                  StrongBullishBuffer[i] = low[i] - 10 * _Point;
+               else
+                  BullishBuffer[i] = low[i] - 5 * _Point;
+            }
+            else if(currentStrength < 0)  // Bearish signal
+            {
+               if(MathAbs(currentStrength) >= MinStrength * StrongSignalMultiplier)
+                  StrongBearishBuffer[i] = high[i] + 10 * _Point;
+               else
+                  BearishBuffer[i] = high[i] + 5 * _Point;
+            }
+         }
+      }
+   }
+   
+   // Return value of prev_calculated for next call
+   return(rates_total);
+}
+
+//+------------------------------------------------------------------+
+//| Calculate signal strength based on pattern analysis              |
+//+------------------------------------------------------------------+
+double CalculateSignalStrength(const int index, 
+                              const double &open[],
+                              const double &high[], 
+                              const double &low[], 
+                              const double &close[],
+                              const long &tick_volume[],
+                              const int rates_total)
+{
+   double strength = 0;
+   
+   // Need enough bars for lookback
+   if(index < LookbackPeriod || index >= rates_total - 1)
+      return 0;
+   
+   // Check for bullish reversal
+   bool bullishReversal = false;
+   bool bearishReversal = false;
+   
+   // Find local extremes
+   double lowestLow = low[index];
+   double highestHigh = high[index];
+   
+   for(int i = 1; i <= LookbackPeriod; i++)
+   {
+      if(index - i >= 0)
+      {
+         if(low[index - i] < lowestLow)
+            lowestLow = low[index - i];
+         
+         if(high[index - i] > highestHigh)
+            highestHigh = high[index - i];
+      }
+   }
+   
+   // Price action patterns
+   
+   // Bullish engulfing or hammer
+   if(index > 0 && 
+      close[index] > open[index] && 
+      close[index - 1] < open[index - 1] &&
+      close[index] > open[index - 1] &&
+      open[index] < close[index - 1])
+   {
+      bullishReversal = true;
+      strength += 1.0 + (0.1 * Sensitivity);
+   }
+   
+   // Bearish engulfing or shooting star
+   if(index > 0 &&
+      close[index] < open[index] && 
+      close[index - 1] > open[index - 1] &&
+      close[index] < open[index - 1] &&
+      open[index] > close[index - 1])
+   {
+      bearishReversal = true;
+      strength -= 1.0 + (0.1 * Sensitivity);
+   }
+   
+   // Check for double bottom
+   if(index >= 2 &&
+      MathAbs(low[index] - lowestLow) < 20 * _Point && 
+      MathAbs(low[index - 2] - lowestLow) < 20 * _Point &&
+      low[index - 1] > lowestLow + 20 * _Point)
+   {
+      bullishReversal = true;
+      strength += 2.0 + (0.15 * Sensitivity);
+   }
+   
+   // Check for double top
+   if(index >= 2 &&
+      MathAbs(high[index] - highestHigh) < 20 * _Point && 
+      MathAbs(high[index - 2] - highestHigh) < 20 * _Point &&
+      high[index - 1] < highestHigh - 20 * _Point)
+   {
+      bearishReversal = true;
+      strength -= 2.0 + (0.15 * Sensitivity);
+   }
+   
+   // Volume confirmation
+   if(UseVolume && tick_volume[index] > 0)
+   {
+      double avgVolume = 0;
+      int count = 0;
+      for(int i = 1; i <= LookbackPeriod; i++)
+      {
+         if(index - i >= 0)
+         {
+            avgVolume += (double)tick_volume[index - i];
+            count++;
+         }
+      }
+      
+      if(count > 0)
+      {
+         avgVolume /= count;
+         
+         if((double)tick_volume[index] > 1.5 * avgVolume)
+         {
+            if(bullishReversal)
+               strength *= 1.2;
+            else if(bearishReversal)
+               strength *= 1.2;
+         }
+      }
+   }
+   
+   return strength;
+}
+
+//+------------------------------------------------------------------+
+//| Apply quantum-inspired filtering to the signal                   |
+//+------------------------------------------------------------------+
+double ApplyQuantumFilter(const double strength, const int index, const double &close[])
+{
+   // Simple quantum-inspired noise reduction
+   double filteredStrength = strength;
+   
+   // Add a quantum uncertainty factor based on market volatility
+   double volatility = 0;
+   int count = 0;
+   for(int i = 1; i <= 10; i++)
+   {
+      if(index - i >= 0)
+      {
+         volatility += MathAbs(close[index] - close[index-i]);
+         count++;
+      }
+   }
+   
+   if(count > 0)
+      volatility /= count;
+   
+   // Apply quantum-inspired phase factor
+   double phase = MathSin(index * 0.1) * 0.3;
+   double amplitude = MathExp(-volatility * 0.5);
+   
+   // Quantum coherence adjustment
+   filteredStrength *= (1.0 + phase * amplitude);
+   
+   // Quantum uncertainty threshold
+   if(MathAbs(filteredStrength) < 0.5)
+      filteredStrength = 0;
+      
+   return filteredStrength;
+}
+
+//+------------------------------------------------------------------+
+//| Get confirmation from multiple timeframes                        |
+//+------------------------------------------------------------------+
+double GetMultiTimeframeConfirmation(datetime currentTime, bool isBullish)
+{
+   double confirmation = 0;
+   
+   for(int tf = 0; tf < ArraySize(Timeframes); tf++)
+   {
+      if(UseTimeframes[tf])
+      {
+         int tfShift = iBarShift(_Symbol, Timeframes[tf], currentTime);
+         
+         if(tfShift >= 0)
+         {
+            double high1 = iHigh(_Symbol, Timeframes[tf], tfShift);
+            double low1 = iLow(_Symbol, Timeframes[tf], tfShift);
+            double close1 = iClose(_Symbol, Timeframes[tf], tfShift);
+            double open1 = iOpen(_Symbol, Timeframes[tf], tfShift);
+            
+            if(tfShift + 1 < iBars(_Symbol, Timeframes[tf]))
+            {
+               double high2 = iHigh(_Symbol, Timeframes[tf], tfShift + 1);
+               double low2 = iLow(_Symbol, Timeframes[tf], tfShift + 1);
+               double close2 = iClose(_Symbol, Timeframes[tf], tfShift + 1);
+               double open2 = iOpen(_Symbol, Timeframes[tf], tfShift + 1);
+               
+               // Simple trend detection on this timeframe
+               bool tfBullish = (close1 > open1 && close1 > close2);
+               bool tfBearish = (close1 < open1 && close1 < close2);
+               
+               // Add to confirmation if this timeframe agrees with main signal
+               if((isBullish && tfBullish) || (!isBullish && tfBearish))
+                  confirmation += 1.0;
+               else
+                  confirmation -= 0.5;
+            }
+         }
+      }
+   }
+   
+   return confirmation;
+}
