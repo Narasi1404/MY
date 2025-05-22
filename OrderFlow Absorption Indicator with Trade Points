@@ -1,0 +1,798 @@
+//+------------------------------------------------------------------+
+//|                         OrderFlow Absorption Indicator with Trade Points.mq5 |
+//|                                        Converted from PineScript code |
+//|                                                          by © nico-von |
+//+------------------------------------------------------------------+
+#property copyright "Converted from PineScript by © nico-von"
+#property link      ""
+#property version   "1.00"
+#property indicator_chart_window
+#property indicator_buffers 0
+#property indicator_plots 0
+#property description "OrderFlow Absorption Indicator detects price absorption events based on volume and price movements"
+
+//--- Input parameters
+input group "Historical/ Backfill Settings"
+input bool   UseHistoricalData = false; // Plot Historical Absorption
+input ENUM_TIMEFRAMES HistoricalTimeframe = PERIOD_M1; // Historical Data Timeframe
+
+input group "Tick Settings"
+input double TickSize = 5.0; // Desired Tick Size
+input bool   UseAutoTickSize = false; // Use ATR for automatic tick size
+
+input group "Volume Settings"
+input double VolumeLimit = 50.0; // Volume threshold for absorption
+input bool   UseAutoVolumeLimit = false; // Auto calculate volume limit
+input int    AutoVolumePeriod = 14; // Period for auto volume calculation
+
+input group "Time Limit Settings"
+input bool   EnableTimeLimit = false; // Enable time limit (realtime only)
+input double TimeLimit = 0.5; // Time limit (seconds)
+
+input group "Other Settings"
+input bool   DeltaMode = true; // Enable Delta Mode
+input bool   ShowRecommendations = true; // Show recommendation table
+input bool   GenerateSignals = true; // Generate buy/sell signals
+input double SignalThreshold = 100.0; // Volume threshold for signals
+
+input group "Trade Points Settings"
+input bool   ShowTradePoints = true; // Show entry, stop-loss and take-profit
+input double StopLossPips = 20.0; // Stop loss in pips
+input double TakeProfitPips = 40.0; // Take profit in pips
+input bool   AutoAdjustSLTP = false; // Auto adjust SL/TP based on recent volatility
+
+input group "Style Settings"
+input color  NeutralColor = clrYellow; // Regular
+input color  AskColor = clrRed; // Ask Delta
+input color  BidColor = clrGreen; // Bid Delta
+input color  StopLossColor = clrRed; // Stop Loss Line Color
+input color  TakeProfitColor = clrGreen; // Take Profit Line Color
+input color  EntryColor = clrWhite; // Entry Point Color
+
+//--- Constants
+const int UP_DIRECTION = 1;
+const int NT_DIRECTION = 0;
+const int DOWN_DIRECTION = -1;
+const string CHAR_TO_USE = "×";
+const string CHAR_TO_USE_POINTER = "■";
+
+//--- Global variables
+double PrevVolume = 0;
+double CurrentVolume = 0;
+double VolumeChange = 0;
+double MovingPrice = 0;
+double NextPriceInQueue = 0;
+int MoveDirection = NT_DIRECTION;
+double VolumeAccumulator = 0;
+datetime StartingTime = 0;
+datetime NextTimeInQueue = 0;
+
+// Signal related variables
+datetime LastSignalTime = 0;
+int LastSignalType = 0; // 1 for buy, -1 for sell, 0 for none
+
+// Trade points variables
+double LastEntryPrice = 0;
+double LastStopLossPrice = 0;
+double LastTakeProfitPrice = 0;
+datetime LastTradeTime = 0;
+bool IsActiveTrade = false;
+
+// Trade statistics variables
+int TotalSignals = 0;
+int WinningTrades = 0;
+int LosingTrades = 0;
+double ProfitFactor = 0.0;
+double WinRate = 0.0;
+
+//--- Collections to store absorption events
+struct AbsorptionEvent {
+    double price;
+    double buyVolAbsorbed;
+    double sellVolAbsorbed;
+    double deltaValue;
+    bool isRealtime;
+    string labelId;
+    datetime time;
+    int signal; // 1 for buy, -1 for sell, 0 for neutral
+};
+
+int AbsorptionEventCount = 0;
+AbsorptionEvent AbsorptionEvents[];
+
+// Handle for ATR indicator
+int ATRHandle = INVALID_HANDLE;
+
+// Constants for signal types
+const int SIGNAL_NONE = 0;
+const int SIGNAL_BUY = 1;
+const int SIGNAL_SELL = -1;
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit() {
+    // Initialize indicator buffers and parameters
+    
+    // Setup the graphical objects   
+    ObjectsDeleteAll(0, "AbsorptionInd_");
+    
+    // Initialize ATR indicator handle
+    if(UseAutoTickSize || AutoAdjustSLTP) {
+        ATRHandle = iATR(_Symbol, PERIOD_M1, 14);
+        if(ATRHandle == INVALID_HANDLE) {
+            Print("Failed to create ATR indicator handle");
+            return(INIT_FAILED);
+        }
+    }
+    
+    // Create recommendation table if enabled
+    if(ShowRecommendations) {
+        CreateRecommendationTable();
+    }
+    
+    // Reset signal related variables
+    LastSignalTime = 0;
+    LastSignalType = 0;
+    
+    // Reset trade points variables
+    LastEntryPrice = 0;
+    LastStopLossPrice = 0;
+    LastTakeProfitPrice = 0;
+    LastTradeTime = 0;
+    IsActiveTrade = false;
+
+    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator deinitialization function                       |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason) {
+    // Delete all graphical objects
+    ObjectsDeleteAll(0, "AbsorptionInd_");
+    ObjectsDeleteAll(0, "AbsorptionInd_Trade_");
+    
+    // Release the ATR indicator handle
+    if(ATRHandle != INVALID_HANDLE) {
+        IndicatorRelease(ATRHandle);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[]) {
+    
+    // Check if we have enough data
+    if(rates_total < 2) return(0);
+    
+    // Determine effective tick size
+    double effectiveTickSize = TickSize;
+    if(UseAutoTickSize && ATRHandle != INVALID_HANDLE) {
+        double atrBuffer[];
+        if(CopyBuffer(ATRHandle, 0, 0, 1, atrBuffer) > 0) {
+            effectiveTickSize = atrBuffer[0];
+        }
+    }
+    
+    // Determine effective volume limit
+    double effectiveVolumeLimit = VolumeLimit;
+    if(UseAutoVolumeLimit) {
+        effectiveVolumeLimit = CalculateAutoVolumeLimit(tick_volume, rates_total, AutoVolumePeriod);
+    }
+    
+    // Process only the latest bar for real-time mode
+    int limit = MathMin(rates_total - 1, rates_total - prev_calculated + 50);
+    
+    // Process historical data if enabled
+    if(UseHistoricalData && prev_calculated < rates_total) {
+        ProcessHistoricalData(rates_total, prev_calculated, time, close, tick_volume, effectiveTickSize, effectiveVolumeLimit);
+    }
+    
+    // Process real-time data (latest bar)
+    if(rates_total > 0) {
+        double closeTick = CalculateTick(close[rates_total-1], effectiveTickSize);
+        CurrentVolume = (double)tick_volume[rates_total-1]; // Explicit casting from long to double
+        VolumeChange = CurrentVolume - PrevVolume;
+        
+        // Update absorption object with real-time data
+        ProcessRealTimeData(closeTick, VolumeChange, time[rates_total-1]);
+        
+        // Store current volume for next iteration
+        PrevVolume = CurrentVolume;
+    }
+    
+    // Draw absorption events
+    DrawAbsorptionEvents();
+    
+    // Update recommendation table if needed
+    if(ShowRecommendations && UseAutoTickSize) {
+        UpdateRecommendationTable(effectiveTickSize);
+    }
+    
+    // Check for and notify about signals
+    if(GenerateSignals) {
+        CheckForNewSignals();
+    }
+    
+    // Check if we need to update trade points
+    if(ShowTradePoints && GenerateSignals) {
+        UpdateTradePoints(close[rates_total-1]);
+    }
+    
+    // Check if any stop loss or take profit has been hit
+    if(IsActiveTrade && rates_total > 0) {
+        CheckStopLossAndTakeProfit(high[rates_total-1], low[rates_total-1]);
+    }
+    
+    return(rates_total);
+}
+
+//+------------------------------------------------------------------+
+//| Calculate tick-rounded price                                     |
+//+------------------------------------------------------------------+
+double CalculateTick(double price, double tickSize) {
+    if(tickSize <= 0) return price; // Safety check
+    double multiplier = MathRound(price / tickSize);
+    return multiplier * tickSize;
+}
+
+//+------------------------------------------------------------------+
+//| Convert seconds to milliseconds                                  |
+//+------------------------------------------------------------------+
+int ConvertSecsToMs(double seconds) {
+    return (int)MathRound(seconds * 1000);
+}
+
+//+------------------------------------------------------------------+
+//| Get direction of price movement                                  |
+//+------------------------------------------------------------------+
+int GetDirection(double movePrice, double nextPrice) {
+    if(movePrice == nextPrice)
+        return NT_DIRECTION;
+    else if(movePrice > nextPrice)
+        return DOWN_DIRECTION;
+    else
+        return UP_DIRECTION;
+}
+
+//+------------------------------------------------------------------+
+//| Check if absorption occurred                                     |
+//+------------------------------------------------------------------+
+bool CheckAbsorption(int currDirection, int moveDirection, bool metTimeLimit=true) {
+    return (currDirection != moveDirection) && metTimeLimit;
+}
+
+//+------------------------------------------------------------------+
+//| Check if price changed                                           |
+//+------------------------------------------------------------------+
+bool CheckPriceChange(double currPrice, double newPrice) {
+    return currPrice != newPrice;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate auto volume limit                                      |
+//+------------------------------------------------------------------+
+double CalculateAutoVolumeLimit(const long &tick_volume[], int rates_total, int period) {
+    if(rates_total < period)
+        return VolumeLimit;
+        
+    double sum = 0, sum2 = 0;
+    int count = 0;
+    
+    for(int i = rates_total - 1; i >= rates_total - period && i >= 0; i--) {
+        double vol = (double)tick_volume[i]; // Explicit casting from long to double
+        sum += vol;
+        sum2 += vol * vol;
+        count++;
+    }
+    
+    if(count < 2)
+        return VolumeLimit;
+        
+    double variance = (sum2 - (sum * sum) / count) / (count - 1);
+    return MathSqrt(variance); // Standard deviation
+}
+
+//+------------------------------------------------------------------+
+//| Process historical data                                          |
+//+------------------------------------------------------------------+
+void ProcessHistoricalData(const int rates_total, const int prev_calculated, 
+                         const datetime &time[], const double &close[], 
+                         const long &tick_volume[], double tickSize, double volLimit) {
+    // Skip if we don't have enough history
+    if(rates_total <= 1) return;
+    
+    // Define starting point for processing
+    int start = prev_calculated > 0 ? prev_calculated - 1 : 0;
+    
+    // Temporary variables for historical processing
+    double lastPrice = 0;
+    double accumulatedVolume = 0;
+    int lastDirection = NT_DIRECTION;
+    
+    // Process each historical bar
+    for(int i = start; i < rates_total - 1; i++) {
+        double currentPriceTick = CalculateTick(close[i], tickSize);
+        double nextPriceTick = CalculateTick(close[i+1], tickSize);
+        double barVolume = (double)tick_volume[i];
+        
+        // Skip zero volume bars
+        if(barVolume <= 0) continue;
+        
+        // First bar initialization
+        if(lastPrice == 0) {
+            lastPrice = currentPriceTick;
+            continue;
+        }
+        
+        // Check price change
+        if(currentPriceTick != lastPrice) {
+            int currentDirection = GetDirection(lastPrice, currentPriceTick);
+            
+            // If direction has changed and we have accumulated volume
+            if(lastDirection != NT_DIRECTION && currentDirection != lastDirection && accumulatedVolume >= volLimit) {
+                bool isBuy = (lastDirection == DOWN_DIRECTION);
+                
+                // Add to absorption events
+                AddAbsorptionEvent(lastPrice, isBuy ? accumulatedVolume : 0, isBuy ? 0 : accumulatedVolume, 
+                                   time[i], false);
+            }
+            
+            // Reset accumulators
+            lastPrice = currentPriceTick;
+            lastDirection = GetDirection(currentPriceTick, nextPriceTick);
+            accumulatedVolume = barVolume;
+        } else {
+            // Accumulate volume at same price level
+            accumulatedVolume += barVolume;
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Process real-time data                                           |
+//+------------------------------------------------------------------+
+void ProcessRealTimeData(double priceTick, double volumeChange, datetime currentTime) {
+    bool priceChanged = CheckPriceChange(MovingPrice, priceTick);
+    int currDirection = GetDirection(MovingPrice, priceTick);
+    double absorbingPrice = 0;
+    bool absorbed = false;
+    bool isBuy = false;
+    double volumeAbsorbed = 0;
+    
+    // First initialization
+    if(MovingPrice == 0) {
+        MovingPrice = priceTick;
+    }
+    
+    if(StartingTime == 0) {
+        StartingTime = (datetime)TimeCurrent();
+    }
+    
+    if(priceChanged && MoveDirection == NT_DIRECTION) {
+        MoveDirection = currDirection;
+        NextPriceInQueue = priceTick;
+        NextTimeInQueue = (datetime)TimeCurrent();
+    }
+    
+    if(priceChanged && MoveDirection != NT_DIRECTION) {
+        bool metTimeLimit = true;
+        if(EnableTimeLimit) {
+            datetime expectedTime = StartingTime + (datetime)(TimeLimit);
+            metTimeLimit = (datetime)TimeCurrent() <= expectedTime;
+        }
+        
+        absorbed = CheckAbsorption(currDirection, MoveDirection, metTimeLimit);
+        absorbingPrice = MovingPrice;
+        
+        if(absorbed) {
+            volumeAbsorbed = VolumeAccumulator;
+            isBuy = (MoveDirection == DOWN_DIRECTION);
+            
+            // Add to absorption events
+            AddAbsorptionEvent(absorbingPrice, isBuy ? volumeAbsorbed : 0, isBuy ? 0 : volumeAbsorbed, 
+                               currentTime, true);
+        }
+        
+        StartingTime = NextTimeInQueue;
+        NextTimeInQueue = (datetime)TimeCurrent();
+        MovingPrice = NextPriceInQueue;
+        NextPriceInQueue = priceTick;
+        MoveDirection = currDirection;
+        VolumeAccumulator = volumeChange;
+    }
+    else if(!priceChanged) {
+        VolumeAccumulator += volumeChange;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Add new absorption event                                         |
+//+------------------------------------------------------------------+
+void AddAbsorptionEvent(double price, double buyVol, double sellVol, datetime eventTime, bool isRealtime) {
+    // Check if we already have an event at this price
+    for(int i = 0; i < AbsorptionEventCount; i++) {
+        if(AbsorptionEvents[i].price == price) {
+            // Update existing event
+            AbsorptionEvents[i].buyVolAbsorbed += buyVol;
+            AbsorptionEvents[i].sellVolAbsorbed += sellVol;
+            AbsorptionEvents[i].deltaValue = AbsorptionEvents[i].buyVolAbsorbed - AbsorptionEvents[i].sellVolAbsorbed;
+            
+            // Update signal if needed
+            if(GenerateSignals) {
+                DetermineSignal(i);
+            }
+            return;
+        }
+    }
+    
+    // Add new event
+    AbsorptionEventCount++;
+    ArrayResize(AbsorptionEvents, AbsorptionEventCount);
+    
+    AbsorptionEvents[AbsorptionEventCount-1].price = price;
+    AbsorptionEvents[AbsorptionEventCount-1].buyVolAbsorbed = buyVol;
+    AbsorptionEvents[AbsorptionEventCount-1].sellVolAbsorbed = sellVol;
+    AbsorptionEvents[AbsorptionEventCount-1].deltaValue = buyVol - sellVol;
+    AbsorptionEvents[AbsorptionEventCount-1].isRealtime = isRealtime;
+    AbsorptionEvents[AbsorptionEventCount-1].labelId = "AbsorptionInd_Label_" + IntegerToString(AbsorptionEventCount);
+    AbsorptionEvents[AbsorptionEventCount-1].time = eventTime;
+    AbsorptionEvents[AbsorptionEventCount-1].signal = 0; // Default no signal
+    
+    // Determine if this event generates a signal
+    if(GenerateSignals) {
+        DetermineSignal(AbsorptionEventCount-1);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Draw absorption events                                           |
+//+------------------------------------------------------------------+
+void DrawAbsorptionEvents() {
+    // Clear existing labels
+    ObjectsDeleteAll(0, "AbsorptionInd_Label_");
+    ObjectsDeleteAll(0, "AbsorptionInd_Signal_");
+    
+    for(int i = 0; i < AbsorptionEventCount; i++) {
+        string labelText;
+        color textColor;
+        
+        if(DeltaMode) {
+            labelText = StringFormat("%s %.2f", CHAR_TO_USE_POINTER, AbsorptionEvents[i].deltaValue);
+            textColor = AbsorptionEvents[i].deltaValue >= 0 ? BidColor : AskColor;
+        }
+        else {
+            labelText = StringFormat("%s ▲ %.2f  %s  ▼ %.2f", CHAR_TO_USE_POINTER, 
+                         AbsorptionEvents[i].buyVolAbsorbed, CHAR_TO_USE, AbsorptionEvents[i].sellVolAbsorbed);
+            textColor = NeutralColor;
+        }
+        
+        string tooltipText = StringFormat("%.5f \nVol Absorbed by Bids: %.2f \nVol Absorbed by Asks: %.2f \nRealtime Data: %s", 
+                              AbsorptionEvents[i].price, AbsorptionEvents[i].buyVolAbsorbed, AbsorptionEvents[i].sellVolAbsorbed,
+                              AbsorptionEvents[i].isRealtime ? "Yes" : "No");
+        
+        // Create text object
+        datetime currentTime = TimeCurrent();
+        ObjectCreate(0, AbsorptionEvents[i].labelId, OBJ_TEXT, 0, currentTime, AbsorptionEvents[i].price);
+        ObjectSetString(0, AbsorptionEvents[i].labelId, OBJPROP_TEXT, labelText);
+        ObjectSetInteger(0, AbsorptionEvents[i].labelId, OBJPROP_COLOR, textColor);
+        ObjectSetInteger(0, AbsorptionEvents[i].labelId, OBJPROP_FONTSIZE, 10);
+        ObjectSetString(0, AbsorptionEvents[i].labelId, OBJPROP_TOOLTIP, tooltipText);
+        ObjectSetInteger(0, AbsorptionEvents[i].labelId, OBJPROP_ANCHOR, ANCHOR_LEFT);
+        
+        // Draw signal arrows if enabled and we have a signal
+        if(GenerateSignals && AbsorptionEvents[i].signal != 0) {
+            string signalId = "AbsorptionInd_Signal_" + IntegerToString(i);
+            ENUM_OBJECT arrowType = AbsorptionEvents[i].signal == 1 ? OBJ_ARROW_BUY : OBJ_ARROW_SELL;
+            color arrowColor = AbsorptionEvents[i].signal == 1 ? BidColor : AskColor;
+            double arrowPrice = AbsorptionEvents[i].signal == 1 ? 
+                                AbsorptionEvents[i].price - SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 50 : 
+                                AbsorptionEvents[i].price + SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 50;
+            
+            ObjectCreate(0, signalId, arrowType, 0, currentTime, arrowPrice);
+            ObjectSetInteger(0, signalId, OBJPROP_COLOR, arrowColor);
+            ObjectSetInteger(0, signalId, OBJPROP_WIDTH, 2);
+            ObjectSetString(0, signalId, OBJPROP_TOOLTIP, 
+                          AbsorptionEvents[i].signal == 1 ? "BUY Signal" : "SELL Signal");
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Create recommendation table                                      |
+//+------------------------------------------------------------------+
+void CreateRecommendationTable() {
+    string tableName = "AbsorptionInd_RecommendationTable";
+    double atrValue = 0;
+    
+    // Get ATR value
+    if(ATRHandle != INVALID_HANDLE) {
+        double atrBuffer[];
+        if(CopyBuffer(ATRHandle, 0, 0, 1, atrBuffer) > 0) {
+            atrValue = atrBuffer[0];
+        }
+    }
+    
+    // Create the table
+    if(ObjectFind(0, tableName) < 0) {
+        ObjectCreate(0, tableName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+        ObjectSetInteger(0, tableName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+        ObjectSetInteger(0, tableName, OBJPROP_XDISTANCE, 10);
+        ObjectSetInteger(0, tableName, OBJPROP_YDISTANCE, 10);
+        ObjectSetInteger(0, tableName, OBJPROP_XSIZE, 250);
+        ObjectSetInteger(0, tableName, OBJPROP_YSIZE, 40); // Reduced size
+        ObjectSetInteger(0, tableName, OBJPROP_BGCOLOR, clrBlack);
+        ObjectSetInteger(0, tableName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+        ObjectSetInteger(0, tableName, OBJPROP_COLOR, clrWhite);
+        ObjectSetInteger(0, tableName, OBJPROP_WIDTH, 1);
+        ObjectSetInteger(0, tableName, OBJPROP_BACK, false);
+        ObjectSetInteger(0, tableName, OBJPROP_SELECTABLE, false);
+        ObjectSetInteger(0, tableName, OBJPROP_SELECTED, false);
+        ObjectSetInteger(0, tableName, OBJPROP_HIDDEN, true);
+        ObjectSetInteger(0, tableName, OBJPROP_ZORDER, 0);
+    }
+    
+    // Create text objects for the table
+    string tickSizeText = "AbsorptionInd_TickSizeText";
+    
+    if(ObjectFind(0, tickSizeText) < 0) {
+        ObjectCreate(0, tickSizeText, OBJ_LABEL, 0, 0, 0);
+        ObjectSetInteger(0, tickSizeText, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+        ObjectSetInteger(0, tickSizeText, OBJPROP_XDISTANCE, 240);
+        ObjectSetInteger(0, tickSizeText, OBJPROP_YDISTANCE, 25);
+        ObjectSetInteger(0, tickSizeText, OBJPROP_COLOR, clrWhite);
+        ObjectSetString(0, tickSizeText, OBJPROP_TEXT, "Recommended Tick Size: " + DoubleToString(atrValue, 5));
+        ObjectSetInteger(0, tickSizeText, OBJPROP_FONTSIZE, 8);
+        ObjectSetInteger(0, tickSizeText, OBJPROP_SELECTABLE, false);
+    }
+    else {
+        ObjectSetString(0, tickSizeText, OBJPROP_TEXT, "Recommended Tick Size: " + DoubleToString(atrValue, 5));
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Update recommendation table                                      |
+//+------------------------------------------------------------------+
+void UpdateRecommendationTable(double tickSize) {
+    string tickSizeText = "AbsorptionInd_TickSizeText";
+    
+    if(ObjectFind(0, tickSizeText) >= 0) {
+        ObjectSetString(0, tickSizeText, OBJPROP_TEXT, "Recommended Tick Size: " + DoubleToString(tickSize, 5));
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Determine signal based on absorption data                        |
+//+------------------------------------------------------------------+
+void DetermineSignal(int eventIndex) {
+    if(eventIndex < 0 || eventIndex >= AbsorptionEventCount) return;
+    
+    // Access array element directly without reference
+    double buyVolAbsorbed = AbsorptionEvents[eventIndex].buyVolAbsorbed;
+    double sellVolAbsorbed = AbsorptionEvents[eventIndex].sellVolAbsorbed;
+    double totalAbsorbed = buyVolAbsorbed + sellVolAbsorbed;
+    
+    // Check volume against threshold to determine if this is a significant event
+    if(totalAbsorbed >= SignalThreshold) {
+        // Generate buy signal when significant buying pressure is absorbed
+        if(buyVolAbsorbed > sellVolAbsorbed * 1.5) {
+            AbsorptionEvents[eventIndex].signal = SIGNAL_BUY;
+        }
+        // Generate sell signal when significant selling pressure is absorbed
+        else if(sellVolAbsorbed > buyVolAbsorbed * 1.5) {
+            AbsorptionEvents[eventIndex].signal = SIGNAL_SELL;
+        }
+        else {
+            AbsorptionEvents[eventIndex].signal = SIGNAL_NONE; // Not enough imbalance for a signal
+        }
+    }
+    else {
+        AbsorptionEvents[eventIndex].signal = SIGNAL_NONE; // Not enough volume for a signal
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check for new signals and send alerts if configured              |
+//+------------------------------------------------------------------+
+void CheckForNewSignals() {
+    datetime currentTime = TimeCurrent();
+    
+    // Find the most recent signal
+    for(int i = 0; i < AbsorptionEventCount; i++) {
+        // Skip if not a signal or if we've already processed it
+        if(AbsorptionEvents[i].signal == SIGNAL_NONE || 
+           AbsorptionEvents[i].time <= LastSignalTime ||
+           !AbsorptionEvents[i].isRealtime) continue;
+        
+        // New signal found
+        if(AbsorptionEvents[i].time > LastSignalTime) {
+            // Update last signal time and type
+            LastSignalTime = AbsorptionEvents[i].time;
+            LastSignalType = AbsorptionEvents[i].signal;
+            
+            // Create new trade points if enabled
+            if(ShowTradePoints) {
+                CreateTradePoints(AbsorptionEvents[i].price, AbsorptionEvents[i].signal);
+            }
+            
+            // Send alert about the new signal
+            string alertMessage = StringFormat("OrderFlow Absorption: %s signal at price %.5f", 
+                                 AbsorptionEvents[i].signal == SIGNAL_BUY ? "BUY" : "SELL",
+                                 AbsorptionEvents[i].price);
+                                 
+            Alert(alertMessage);
+            Print(alertMessage);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Create trade points based on signal                              |
+//+------------------------------------------------------------------+
+void CreateTradePoints(double entryPrice, int signalType) {
+    // Delete any existing trade points
+    ObjectsDeleteAll(0, "AbsorptionInd_Trade_");
+    
+    if(signalType == SIGNAL_NONE) return;
+    
+    // Calculate pip value
+    double pipValue = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 10;
+    
+    // Determine effective SL and TP sizes
+    double effectiveSL = StopLossPips;
+    double effectiveTP = TakeProfitPips;
+    
+    // Auto-adjust SL/TP if enabled
+    if(AutoAdjustSLTP && ATRHandle != INVALID_HANDLE) {
+        double atrBuffer[];
+        if(CopyBuffer(ATRHandle, 0, 0, 1, atrBuffer) > 0) {
+            // Adjust SL/TP based on ATR value (volatility)
+            double atrFactor = atrBuffer[0] / pipValue;
+            effectiveSL = MathMax(StopLossPips, atrFactor * 5); // At least 5 ATR units
+            effectiveTP = MathMax(TakeProfitPips, atrFactor * 10); // At least 10 ATR units
+        }
+    }
+    
+    // Calculate stop loss and take profit levels
+    double stopLossPrice, takeProfitPrice;
+    
+    if(signalType == SIGNAL_BUY) {
+        stopLossPrice = entryPrice - (effectiveSL * pipValue);
+        takeProfitPrice = entryPrice + (effectiveTP * pipValue);
+    } else { // SIGNAL_SELL
+        stopLossPrice = entryPrice + (effectiveSL * pipValue);
+        takeProfitPrice = entryPrice - (effectiveTP * pipValue);
+    }
+    
+    // Save the values for tracking
+    LastEntryPrice = entryPrice;
+    LastStopLossPrice = stopLossPrice;
+    LastTakeProfitPrice = takeProfitPrice;
+    LastTradeTime = TimeCurrent();
+    IsActiveTrade = true;
+    
+    // Create entry point label
+    string entryLabel = "AbsorptionInd_Trade_Entry";
+    ObjectCreate(0, entryLabel, OBJ_TEXT, 0, LastTradeTime, entryPrice);
+    ObjectSetString(0, entryLabel, OBJPROP_TEXT, signalType == SIGNAL_BUY ? "BUY" : "SELL");
+    ObjectSetInteger(0, entryLabel, OBJPROP_COLOR, EntryColor);
+    ObjectSetInteger(0, entryLabel, OBJPROP_FONTSIZE, 12);
+    ObjectSetInteger(0, entryLabel, OBJPROP_ANCHOR, ANCHOR_RIGHT);
+    ObjectSetString(0, entryLabel, OBJPROP_TOOLTIP, 
+                  StringFormat("Entry Price: %.5f\nSignal: %s", entryPrice, signalType == SIGNAL_BUY ? "BUY" : "SELL"));
+    
+    // Create stop loss horizontal line
+    string slLabel = "AbsorptionInd_Trade_SL";
+    ObjectCreate(0, slLabel, OBJ_HLINE, 0, 0, stopLossPrice);
+    ObjectSetInteger(0, slLabel, OBJPROP_COLOR, StopLossColor);
+    ObjectSetInteger(0, slLabel, OBJPROP_STYLE, STYLE_DASH);
+    ObjectSetInteger(0, slLabel, OBJPROP_WIDTH, 1);
+    ObjectSetString(0, slLabel, OBJPROP_TOOLTIP, StringFormat("Stop Loss: %.5f", stopLossPrice));
+    
+    // Create take profit horizontal line
+    string tpLabel = "AbsorptionInd_Trade_TP";
+    ObjectCreate(0, tpLabel, OBJ_HLINE, 0, 0, takeProfitPrice);
+    ObjectSetInteger(0, tpLabel, OBJPROP_COLOR, TakeProfitColor);
+    ObjectSetInteger(0, tpLabel, OBJPROP_STYLE, STYLE_DASH);
+    ObjectSetInteger(0, tpLabel, OBJPROP_WIDTH, 1);
+    ObjectSetString(0, tpLabel, OBJPROP_TOOLTIP, StringFormat("Take Profit: %.5f", takeProfitPrice));
+    
+    // Create visual entry line
+    string entryLineLabel = "AbsorptionInd_Trade_EntryLine";
+    ObjectCreate(0, entryLineLabel, OBJ_HLINE, 0, 0, entryPrice);
+    ObjectSetInteger(0, entryLineLabel, OBJPROP_COLOR, EntryColor);
+    ObjectSetInteger(0, entryLineLabel, OBJPROP_STYLE, STYLE_DOT);
+    ObjectSetInteger(0, entryLineLabel, OBJPROP_WIDTH, 1);
+    ObjectSetString(0, entryLineLabel, OBJPROP_TOOLTIP, StringFormat("Entry Level: %.5f", entryPrice));
+    
+    // Print trade information to log
+    Print(StringFormat("Trade setup: %s at %.5f, SL: %.5f, TP: %.5f", 
+          signalType == SIGNAL_BUY ? "BUY" : "SELL", entryPrice, stopLossPrice, takeProfitPrice));
+}
+
+//+------------------------------------------------------------------+
+//| Update trade points                                              |
+//+------------------------------------------------------------------+
+void UpdateTradePoints(double currentPrice) {
+    if(!IsActiveTrade) return;
+    
+    // Update the visual representation of trade points
+    string slLabel = "AbsorptionInd_Trade_SL";
+    string tpLabel = "AbsorptionInd_Trade_TP";
+    string entryLineLabel = "AbsorptionInd_Trade_EntryLine";
+    
+    // Update stop loss line if it exists
+    if(ObjectFind(0, slLabel) >= 0) {
+        ObjectSetDouble(0, slLabel, OBJPROP_PRICE, LastStopLossPrice);
+    }
+    
+    // Update take profit line if it exists
+    if(ObjectFind(0, tpLabel) >= 0) {
+        ObjectSetDouble(0, tpLabel, OBJPROP_PRICE, LastTakeProfitPrice);
+    }
+    
+    // Update entry line if it exists
+    if(ObjectFind(0, entryLineLabel) >= 0) {
+        ObjectSetDouble(0, entryLineLabel, OBJPROP_PRICE, LastEntryPrice);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check if stop loss or take profit was hit                        |
+//+------------------------------------------------------------------+
+void CheckStopLossAndTakeProfit(double currentHigh, double currentLow) {
+    if(!IsActiveTrade) return;
+    
+    bool slHit = false;
+    bool tpHit = false;
+    
+    if(LastSignalType == SIGNAL_BUY) {
+        // For buy positions, check if price went below stop loss or above take profit
+        slHit = (currentLow <= LastStopLossPrice);
+        tpHit = (currentHigh >= LastTakeProfitPrice);
+    } else if(LastSignalType == SIGNAL_SELL) {
+        // For sell positions, check if price went above stop loss or below take profit
+        slHit = (currentHigh >= LastStopLossPrice);
+        tpHit = (currentLow <= LastTakeProfitPrice);
+    }
+    
+    if(slHit || tpHit) {
+        // Trade closed
+        IsActiveTrade = false;
+        TotalSignals++;
+        
+        if(tpHit) {
+            WinningTrades++;
+            Print("Take profit hit for trade at price: ", LastEntryPrice);
+        } else if(slHit) {
+            LosingTrades++;
+            Print("Stop loss hit for trade at price: ", LastEntryPrice);
+        }
+        
+        // Update statistics
+        if(LosingTrades > 0) {
+            ProfitFactor = (double)WinningTrades / (double)LosingTrades;
+        } else {
+            ProfitFactor = WinningTrades > 0 ? 1000.0 : 0.0; // Arbitrary large number if no losses
+        }
+        
+        if(TotalSignals > 0) {
+            WinRate = ((double)WinningTrades / (double)TotalSignals) * 100.0;
+        }
+        
+        // Print statistics
+        Print(StringFormat("Trade Statistics: Total=%d, Wins=%d, Losses=%d, WinRate=%.2f%%, ProfitFactor=%.2f",
+              TotalSignals, WinningTrades, LosingTrades, WinRate, ProfitFactor));
+    }
+}
