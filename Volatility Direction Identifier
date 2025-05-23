@@ -1,0 +1,327 @@
+//+------------------------------------------------------------------+
+//|                                    Volatility Direction Identifier |
+//|                                             Copyright 2024, Claude |
+//|                                                                    |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2024, Claude"
+#property link      ""
+#property version   "1.00"
+#property indicator_separate_window
+#property indicator_buffers 6
+#property indicator_plots   4
+
+//--- Plot settings
+#property indicator_label1  "ATR"
+#property indicator_type1   DRAW_LINE
+#property indicator_color1  clrBlue
+#property indicator_style1  STYLE_SOLID
+#property indicator_width1  2
+
+#property indicator_label2  "Direction"
+#property indicator_type2   DRAW_LINE
+#property indicator_color2  clrRed
+#property indicator_style2  STYLE_SOLID
+#property indicator_width2  2
+
+#property indicator_label3  "Volatility Signal"
+#property indicator_type3   DRAW_HISTOGRAM
+#property indicator_color3  clrGreen
+#property indicator_style3  STYLE_SOLID
+#property indicator_width3  3
+
+#property indicator_label4  "Direction Signal"
+#property indicator_type4   DRAW_HISTOGRAM
+#property indicator_color4  clrOrange
+#property indicator_style4  STYLE_SOLID
+#property indicator_width4  2
+
+//--- Input parameters
+input int    ATR_Period = 14;           // ATR Period
+input int    BB_Period = 20;            // Bollinger Bands Period
+input double BB_Deviation = 2.0;        // Bollinger Bands Deviation
+input int    RSI_Period = 14;           // RSI Period for direction
+input int    MA_Period = 21;            // Moving Average Period for trend
+input double VolatilityThreshold = 1.5; // Volatility threshold multiplier
+input bool   ShowAlerts = true;         // Show alerts
+input bool   ShowArrows = true;         // Show direction arrows
+
+//--- Indicator buffers
+double ATRBuffer[];
+double DirectionBuffer[];
+double VolatilitySignalBuffer[];
+double DirectionSignalBuffer[];
+double CalculationBuffer1[];
+double CalculationBuffer2[];
+
+//--- Global variables
+int atr_handle;
+int bb_handle;
+int rsi_handle;
+int ma_handle;
+datetime last_alert_time = 0;
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   //--- Set indicator buffers
+   SetIndexBuffer(0, ATRBuffer, INDICATOR_DATA);
+   SetIndexBuffer(1, DirectionBuffer, INDICATOR_DATA);
+   SetIndexBuffer(2, VolatilitySignalBuffer, INDICATOR_DATA);
+   SetIndexBuffer(3, DirectionSignalBuffer, INDICATOR_DATA);
+   SetIndexBuffer(4, CalculationBuffer1, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(5, CalculationBuffer2, INDICATOR_CALCULATIONS);
+   
+   //--- Set drawing settings
+   PlotIndexSetString(0, PLOT_LABEL, "ATR");
+   PlotIndexSetString(1, PLOT_LABEL, "Direction");
+   PlotIndexSetString(2, PLOT_LABEL, "Vol Signal");
+   PlotIndexSetString(3, PLOT_LABEL, "Dir Signal");
+   
+   //--- Initialize technical indicators
+   atr_handle = iATR(_Symbol, _Period, ATR_Period);
+   bb_handle = iBands(_Symbol, _Period, BB_Period, 0, BB_Deviation, PRICE_CLOSE);
+   rsi_handle = iRSI(_Symbol, _Period, RSI_Period, PRICE_CLOSE);
+   ma_handle = iMA(_Symbol, _Period, MA_Period, 0, MODE_EMA, PRICE_CLOSE);
+   
+   //--- Check handles
+   if(atr_handle == INVALID_HANDLE || bb_handle == INVALID_HANDLE || 
+      rsi_handle == INVALID_HANDLE || ma_handle == INVALID_HANDLE)
+   {
+      Print("Error creating indicator handles");
+      return(INIT_FAILED);
+   }
+   
+   //--- Set indicator name
+   IndicatorSetString(INDICATOR_SHORTNAME, "Volatility & Direction Identifier");
+   
+   //--- Set digits
+   IndicatorSetInteger(INDICATOR_DIGITS, _Digits + 1);
+   
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+   //--- Check for minimum bars
+   if(rates_total < ATR_Period + MA_Period)
+      return(0);
+   
+   //--- Calculate start position
+   int start_pos = prev_calculated;
+   if(start_pos < ATR_Period + MA_Period)
+      start_pos = ATR_Period + MA_Period;
+   
+   //--- Get indicator data
+   double atr_values[];
+   double bb_upper[], bb_middle[], bb_lower[];
+   double rsi_values[];
+   double ma_values[];
+   
+   ArraySetAsSeries(atr_values, true);
+   ArraySetAsSeries(bb_upper, true);
+   ArraySetAsSeries(bb_middle, true);
+   ArraySetAsSeries(bb_lower, true);
+   ArraySetAsSeries(rsi_values, true);
+   ArraySetAsSeries(ma_values, true);
+   
+   //--- Copy indicator values
+   int copied_atr = CopyBuffer(atr_handle, 0, 0, rates_total, atr_values);
+   int copied_bb_upper = CopyBuffer(bb_handle, 1, 0, rates_total, bb_upper);
+   int copied_bb_lower = CopyBuffer(bb_handle, 2, 0, rates_total, bb_lower);
+   int copied_rsi = CopyBuffer(rsi_handle, 0, 0, rates_total, rsi_values);
+   int copied_ma = CopyBuffer(ma_handle, 0, 0, rates_total, ma_values);
+   
+   if(copied_atr <= 0 || copied_bb_upper <= 0 || copied_bb_lower <= 0 || 
+      copied_rsi <= 0 || copied_ma <= 0)
+      return(0);
+   
+   //--- Main calculation loop
+   for(int i = start_pos; i < rates_total; i++)
+   {
+      int pos = rates_total - 1 - i;
+      
+      //--- Calculate ATR-based volatility
+      double current_atr = atr_values[pos];
+      ATRBuffer[i] = current_atr;
+      
+      //--- Calculate Bollinger Bands width for volatility
+      double bb_width = (bb_upper[pos] - bb_lower[pos]) / close[i] * 100;
+      
+      //--- Calculate average volatility
+      double avg_atr = 0;
+      for(int j = 0; j < 10 && pos + j < copied_atr; j++)
+         avg_atr += atr_values[pos + j];
+      avg_atr /= 10;
+      
+      //--- Volatility signal
+      double volatility_ratio = current_atr / avg_atr;
+      if(volatility_ratio > VolatilityThreshold)
+         VolatilitySignalBuffer[i] = 1;  // High volatility
+      else if(volatility_ratio < (1.0 / VolatilityThreshold))
+         VolatilitySignalBuffer[i] = -1; // Low volatility
+      else
+         VolatilitySignalBuffer[i] = 0;   // Normal volatility
+      
+      //--- Direction analysis
+      double direction_score = 0;
+      
+      // RSI component
+      if(rsi_values[pos] > 70)
+         direction_score += 0.3;  // Overbought
+      else if(rsi_values[pos] < 30)
+         direction_score -= 0.3;  // Oversold
+      
+      // Moving Average component
+      if(close[i] > ma_values[pos])
+         direction_score += 0.4;  // Above MA
+      else
+         direction_score -= 0.4;  // Below MA
+      
+      // Price momentum component
+      if(i > 0)
+      {
+         double momentum = (close[i] - close[i-1]) / close[i-1] * 100;
+         if(momentum > 0.1)
+            direction_score += 0.3;
+         else if(momentum < -0.1)
+            direction_score -= 0.3;
+      }
+      
+      DirectionBuffer[i] = direction_score;
+      
+      //--- Direction signal
+      if(direction_score > 0.5)
+         DirectionSignalBuffer[i] = 1;   // Bullish
+      else if(direction_score < -0.5)
+         DirectionSignalBuffer[i] = -1;  // Bearish
+      else
+         DirectionSignalBuffer[i] = 0;   // Neutral
+      
+      //--- Store calculation values for future use
+      CalculationBuffer1[i] = bb_width;
+      CalculationBuffer2[i] = volatility_ratio;
+   }
+   
+   //--- Check for alerts
+   if(ShowAlerts && rates_total > 1)
+   {
+      CheckForAlerts(rates_total - 1, time[rates_total - 1]);
+   }
+   
+   return(rates_total);
+}
+
+//+------------------------------------------------------------------+
+//| Check for alert conditions                                       |
+//+------------------------------------------------------------------+
+void CheckForAlerts(int pos, datetime current_time)
+{
+   // Avoid multiple alerts for the same bar
+   if(current_time <= last_alert_time)
+      return;
+   
+   string alert_message = "";
+   
+   // High volatility alert
+   if(VolatilitySignalBuffer[pos] == 1)
+      alert_message += "HIGH VOLATILITY detected! ";
+   
+   // Low volatility alert
+   if(VolatilitySignalBuffer[pos] == -1)
+      alert_message += "LOW VOLATILITY detected! ";
+   
+   // Strong bullish signal
+   if(DirectionSignalBuffer[pos] == 1 && DirectionBuffer[pos] > 0.7)
+      alert_message += "STRONG BULLISH signal! ";
+   
+   // Strong bearish signal
+   if(DirectionSignalBuffer[pos] == -1 && DirectionBuffer[pos] < -0.7)
+      alert_message += "STRONG BEARISH signal! ";
+   
+   // Volatility expansion with direction
+   if(VolatilitySignalBuffer[pos] == 1 && MathAbs(DirectionSignalBuffer[pos]) == 1)
+      alert_message += "VOLATILITY BREAKOUT with " + 
+                      (DirectionSignalBuffer[pos] > 0 ? "BULLISH" : "BEARISH") + " bias! ";
+   
+   if(alert_message != "")
+   {
+      Alert(_Symbol + " " + EnumToString(_Period) + ": " + alert_message);
+      last_alert_time = current_time;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Indicator deinitialization function                             |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   //--- Release indicator handles
+   if(atr_handle != INVALID_HANDLE)
+      IndicatorRelease(atr_handle);
+   if(bb_handle != INVALID_HANDLE)
+      IndicatorRelease(bb_handle);
+   if(rsi_handle != INVALID_HANDLE)
+      IndicatorRelease(rsi_handle);
+   if(ma_handle != INVALID_HANDLE)
+      IndicatorRelease(ma_handle);
+}
+
+//+------------------------------------------------------------------+
+//| Get volatility state as string                                  |
+//+------------------------------------------------------------------+
+string GetVolatilityState(int pos)
+{
+   if(pos < 0 || pos >= ArraySize(VolatilitySignalBuffer))
+      return "Unknown";
+   
+   if(VolatilitySignalBuffer[pos] == 1)
+      return "High";
+   else if(VolatilitySignalBuffer[pos] == -1)
+      return "Low";
+   else
+      return "Normal";
+}
+
+//+------------------------------------------------------------------+
+//| Get direction state as string                                   |
+//+------------------------------------------------------------------+
+string GetDirectionState(int pos)
+{
+   if(pos < 0 || pos >= ArraySize(DirectionSignalBuffer))
+      return "Unknown";
+   
+   if(DirectionSignalBuffer[pos] == 1)
+      return "Bullish";
+   else if(DirectionSignalBuffer[pos] == -1)
+      return "Bearish";
+   else
+      return "Neutral";
+}
+
+//+------------------------------------------------------------------+
+//| Custom function to get current market state                     |
+//+------------------------------------------------------------------+
+void GetMarketState(int pos, string &volatility_state, string &direction_state, double &strength)
+{
+   volatility_state = GetVolatilityState(pos);
+   direction_state = GetDirectionState(pos);
+   
+   if(pos >= 0 && pos < ArraySize(DirectionBuffer))
+      strength = MathAbs(DirectionBuffer[pos]);
+   else
+      strength = 0;
+}
