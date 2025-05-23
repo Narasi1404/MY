@@ -1,0 +1,789 @@
+//+------------------------------------------------------------------+
+//|                                    Advanced_SR_Zones.mq5        |
+//|                                  Copyright 2024, Claude AI      |
+//|                                     Professional S&R Indicator  |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2024, Claude AI"
+#property link      ""
+#property version   "1.00"
+#property indicator_chart_window
+#property indicator_plots 0
+
+//--- Input parameters
+input group "=== Zone Settings ==="
+input bool ShowDailyLevels = true;        // Show Daily High/Low
+input bool ShowWeeklyLevels = true;       // Show Weekly High/Low
+input bool ShowMonthlyLevels = true;      // Show Monthly High/Low
+input bool ShowPivotPoints = true;        // Show Pivot Points
+input bool ShowFibonacci = true;          // Show Fibonacci Levels
+input bool ShowPsychological = true;      // Show Round Number Levels
+
+input group "=== Visual Settings ==="
+input int ZoneWidth = 2;                  // Zone Line Width
+input ENUM_LINE_STYLE ZoneStyle = STYLE_SOLID; // Zone Line Style
+input bool ShowZoneLabels = true;         // Show Zone Labels
+input bool ShowStrengthBars = true;       // Show Strength Indicators
+input int MaxZonesPerType = 5;            // Maximum Zones Per Type
+
+input group "=== Colors ==="
+input color SupportColor = clrLimeGreen;     // Support Zone Color
+input color ResistanceColor = clrTomato;     // Resistance Zone Color
+input color PivotColor = clrDodgerBlue;      // Pivot Point Color
+input color FibColor = clrGold;              // Fibonacci Color
+input color PsychColor = clrMagenta;         // Psychological Level Color
+
+input group "=== Sensitivity ==="
+input int SensitivityLevel = 2;           // Sensitivity (1=Low, 2=Medium, 3=High)
+input double MinZoneDistance = 10.0;      // Minimum Distance Between Zones (points)
+
+input group "=== Alert Settings ==="
+input bool EnableAlerts = true;           // Enable Trading Alerts
+input bool EnablePopupAlerts = true;      // Show Popup Alerts
+input bool EnableSoundAlerts = true;      // Play Sound Alerts
+input bool EnableEmailAlerts = false;    // Send Email Alerts
+input bool EnablePushAlerts = false;     // Send Push Notifications
+input string AlertSoundFile = "alert.wav"; // Alert Sound File
+input int MinStrengthForAlert = 70;      // Minimum Zone Strength for Alert
+input double BounceDetectionPips = 5.0;  // Bounce Detection Distance (pips)
+
+//--- Global variables
+struct ZoneData
+{
+   double price;
+   int strength;
+   string type;
+   color zone_color;
+   datetime time_created;
+   bool is_support;
+};
+
+ZoneData SupportZones[];
+ZoneData ResistanceZones[];
+string IndicatorName = "Advanced_SR_Zones";
+
+//--- Alert tracking variables
+double LastPrice = 0;
+datetime LastAlertTime = 0;
+string CurrentBias = "NEUTRAL";
+bool PreviousBullishSignal = false;
+bool PreviousBearishSignal = false;
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   IndicatorSetString(INDICATOR_SHORTNAME, IndicatorName);
+   IndicatorSetInteger(INDICATOR_DIGITS, _Digits);
+   
+   // Initialize arrays
+   ArrayResize(SupportZones, 0);
+   ArrayResize(ResistanceZones, 0);
+   
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator deinitialization function                      |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   // Clean up objects
+   ObjectsDeleteAll(0, IndicatorName);
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+   if(rates_total < 100) return(0);
+   
+   // Clear previous zones
+   ObjectsDeleteAll(0, IndicatorName);
+   ArrayResize(SupportZones, 0);
+   ArrayResize(ResistanceZones, 0);
+   
+   // Calculate all zone types
+   if(ShowDailyLevels) CalculateDailyLevels();
+   if(ShowWeeklyLevels) CalculateWeeklyLevels();
+   if(ShowMonthlyLevels) CalculateMonthlyLevels();
+   if(ShowPivotPoints) CalculatePivotPoints();
+   if(ShowFibonacci) CalculateFibonacciLevels();
+   if(ShowPsychological) CalculatePsychologicalLevels();
+   
+   // Filter and optimize zones
+   FilterZonesByDistance();
+   SortZonesByStrength();
+   
+   // Draw zones on chart
+   DrawSupportZones();
+   DrawResistanceZones();
+   
+   // Display market bias
+   DisplayMarketBias();
+   
+   // Check for trading signals and send alerts
+   if(EnableAlerts)
+   {
+      CheckTradingSignals();
+   }
+   
+   return(rates_total);
+}
+
+//+------------------------------------------------------------------+
+//| Calculate Daily High/Low levels                                  |
+//+------------------------------------------------------------------+
+void CalculateDailyLevels()
+{
+   datetime today = TimeCurrent();
+   datetime day_start = today - (today % 86400);
+   
+   double daily_high = 0, daily_low = DBL_MAX;
+   
+   // Get daily high/low
+   for(int i = 0; i < Bars(_Symbol, PERIOD_H1, day_start, today); i++)
+   {
+      double high_val = iHigh(_Symbol, PERIOD_H1, i);
+      double low_val = iLow(_Symbol, PERIOD_H1, i);
+      
+      if(high_val > daily_high) daily_high = high_val;
+      if(low_val < daily_low) daily_low = low_val;
+   }
+   
+   double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // Add support zone if price is above daily low
+   if(current_price > daily_low && daily_low != DBL_MAX)
+   {
+      AddSupportZone(daily_low, 75, "Daily Low", SupportColor);
+   }
+   
+   // Add resistance zone if price is below daily high
+   if(current_price < daily_high && daily_high > 0)
+   {
+      AddResistanceZone(daily_high, 75, "Daily High", ResistanceColor);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate Weekly High/Low levels                                 |
+//+------------------------------------------------------------------+
+void CalculateWeeklyLevels()
+{
+   MqlRates rates[];
+   int copied = CopyRates(_Symbol, PERIOD_W1, 0, 4, rates);
+   
+   if(copied < 2) return;
+   
+   double weekly_high = rates[1].high;
+   double weekly_low = rates[1].low;
+   double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   if(current_price > weekly_low)
+   {
+      AddSupportZone(weekly_low, 85, "Weekly Low", SupportColor);
+   }
+   
+   if(current_price < weekly_high)
+   {
+      AddResistanceZone(weekly_high, 85, "Weekly High", ResistanceColor);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate Monthly High/Low levels                                |
+//+------------------------------------------------------------------+
+void CalculateMonthlyLevels()
+{
+   MqlRates rates[];
+   int copied = CopyRates(_Symbol, PERIOD_MN1, 0, 3, rates);
+   
+   if(copied < 2) return;
+   
+   double monthly_high = rates[1].high;
+   double monthly_low = rates[1].low;
+   double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   if(current_price > monthly_low)
+   {
+      AddSupportZone(monthly_low, 90, "Monthly Low", SupportColor);
+   }
+   
+   if(current_price < monthly_high)
+   {
+      AddResistanceZone(monthly_high, 90, "Monthly High", ResistanceColor);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate Pivot Points                                           |
+//+------------------------------------------------------------------+
+void CalculatePivotPoints()
+{
+   MqlRates rates[];
+   int copied = CopyRates(_Symbol, PERIOD_D1, 1, 1, rates);
+   
+   if(copied < 1) return;
+   
+   double high = rates[0].high;
+   double low = rates[0].low;
+   double close = rates[0].close;
+   double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   // Calculate pivot points
+   double PP = (high + low + close) / 3;
+   double S1 = (2 * PP) - high;
+   double R1 = (2 * PP) - low;
+   double S2 = PP - (high - low);
+   double R2 = PP + (high - low);
+   double S3 = low - 2 * (high - PP);
+   double R3 = high + 2 * (PP - low);
+   
+   // Add pivot levels
+   if(S1 < current_price) AddSupportZone(S1, 75, "Pivot S1", PivotColor);
+   if(S2 < current_price) AddSupportZone(S2, 80, "Pivot S2", PivotColor);
+   if(S3 < current_price) AddSupportZone(S3, 70, "Pivot S3", PivotColor);
+   
+   if(R1 > current_price) AddResistanceZone(R1, 75, "Pivot R1", PivotColor);
+   if(R2 > current_price) AddResistanceZone(R2, 80, "Pivot R2", PivotColor);
+   if(R3 > current_price) AddResistanceZone(R3, 70, "Pivot R3", PivotColor);
+}
+
+//+------------------------------------------------------------------+
+//| Calculate Fibonacci Levels                                       |
+//+------------------------------------------------------------------+
+void CalculateFibonacciLevels()
+{
+   MqlRates rates[];
+   int copied = CopyRates(_Symbol, PERIOD_W1, 0, 4, rates);
+   
+   if(copied < 2) return;
+   
+   double swing_high = rates[1].high;
+   double swing_low = rates[1].low;
+   double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double range = swing_high - swing_low;
+   
+   // Fibonacci retracement levels
+   double fib_levels[] = {0.236, 0.382, 0.5, 0.618, 0.786};
+   string fib_names[] = {"Fib 23.6%", "Fib 38.2%", "Fib 50%", "Fib 61.8%", "Fib 78.6%"};
+   
+   for(int i = 0; i < ArraySize(fib_levels); i++)
+   {
+      double fib_price = swing_low + (range * fib_levels[i]);
+      int strength = (fib_levels[i] == 0.5 || fib_levels[i] == 0.618) ? 70 : 60;
+      
+      if(MathAbs(fib_price - current_price) > range * 0.02)
+      {
+         if(fib_price < current_price)
+         {
+            AddSupportZone(fib_price, strength, fib_names[i], FibColor);
+         }
+         else
+         {
+            AddResistanceZone(fib_price, strength, fib_names[i], FibColor);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate Psychological Levels (Round Numbers)                   |
+//+------------------------------------------------------------------+
+void CalculatePsychologicalLevels()
+{
+   double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double point_value = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   
+   // Determine increment based on symbol
+   double increment = 10.0;
+   if(StringFind(_Symbol, "JPY", 0) >= 0) increment = 1.0;
+   else if(StringFind(_Symbol, "XAU", 0) >= 0 || StringFind(_Symbol, "GOLD", 0) >= 0) increment = 25.0;
+   
+   // Find round number levels
+   for(double level = MathFloor(current_price / increment) * increment - increment * 3; 
+       level <= current_price + increment * 3; 
+       level += increment)
+   {
+      if(MathAbs(level - current_price) > increment * 0.2 && level > 0)
+      {
+         int strength = (MathMod(level, increment * 2) == 0) ? 65 : 55;
+         string level_name = "Psychological " + DoubleToString(level, _Digits);
+         
+         if(level < current_price)
+         {
+            AddSupportZone(level, strength, level_name, PsychColor);
+         }
+         else
+         {
+            AddResistanceZone(level, strength, level_name, PsychColor);
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Add Support Zone                                                 |
+//+------------------------------------------------------------------+
+void AddSupportZone(double price, int strength, string type, color zone_color)
+{
+   int size = ArraySize(SupportZones);
+   ArrayResize(SupportZones, size + 1);
+   
+   SupportZones[size].price = price;
+   SupportZones[size].strength = strength;
+   SupportZones[size].type = type;
+   SupportZones[size].zone_color = zone_color;
+   SupportZones[size].time_created = TimeCurrent();
+   SupportZones[size].is_support = true;
+}
+
+//+------------------------------------------------------------------+
+//| Add Resistance Zone                                              |
+//+------------------------------------------------------------------+
+void AddResistanceZone(double price, int strength, string type, color zone_color)
+{
+   int size = ArraySize(ResistanceZones);
+   ArrayResize(ResistanceZones, size + 1);
+   
+   ResistanceZones[size].price = price;
+   ResistanceZones[size].strength = strength;
+   ResistanceZones[size].type = type;
+   ResistanceZones[size].zone_color = zone_color;
+   ResistanceZones[size].time_created = TimeCurrent();
+   ResistanceZones[size].is_support = false;
+}
+
+//+------------------------------------------------------------------+
+//| Filter zones by minimum distance                                 |
+//+------------------------------------------------------------------+
+void FilterZonesByDistance()
+{
+   double point_value = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double min_distance = MinZoneDistance * point_value;
+   
+   // Filter support zones
+   for(int i = 0; i < ArraySize(SupportZones) - 1; i++)
+   {
+      for(int j = i + 1; j < ArraySize(SupportZones); j++)
+      {
+         if(MathAbs(SupportZones[i].price - SupportZones[j].price) < min_distance)
+         {
+            // Keep the stronger zone
+            if(SupportZones[i].strength < SupportZones[j].strength)
+            {
+               ArrayRemove(SupportZones, i, 1);
+               i--;
+               break;
+            }
+            else
+            {
+               ArrayRemove(SupportZones, j, 1);
+               j--;
+            }
+         }
+      }
+   }
+   
+   // Filter resistance zones
+   for(int i = 0; i < ArraySize(ResistanceZones) - 1; i++)
+   {
+      for(int j = i + 1; j < ArraySize(ResistanceZones); j++)
+      {
+         if(MathAbs(ResistanceZones[i].price - ResistanceZones[j].price) < min_distance)
+         {
+            if(ResistanceZones[i].strength < ResistanceZones[j].strength)
+            {
+               ArrayRemove(ResistanceZones, i, 1);
+               i--;
+               break;
+            }
+            else
+            {
+               ArrayRemove(ResistanceZones, j, 1);
+               j--;
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Sort zones by strength                                           |
+//+------------------------------------------------------------------+
+void SortZonesByStrength()
+{
+   // Sort support zones by strength (descending)
+   for(int i = 0; i < ArraySize(SupportZones) - 1; i++)
+   {
+      for(int j = i + 1; j < ArraySize(SupportZones); j++)
+      {
+         if(SupportZones[i].strength < SupportZones[j].strength)
+         {
+            ZoneData temp = SupportZones[i];
+            SupportZones[i] = SupportZones[j];
+            SupportZones[j] = temp;
+         }
+      }
+   }
+   
+   // Sort resistance zones by strength (descending)
+   for(int i = 0; i < ArraySize(ResistanceZones) - 1; i++)
+   {
+      for(int j = i + 1; j < ArraySize(ResistanceZones); j++)
+      {
+         if(ResistanceZones[i].strength < ResistanceZones[j].strength)
+         {
+            ZoneData temp = ResistanceZones[i];
+            ResistanceZones[i] = ResistanceZones[j];
+            ResistanceZones[j] = temp;
+         }
+      }
+   }
+   
+   // Limit number of zones
+   if(ArraySize(SupportZones) > MaxZonesPerType)
+      ArrayResize(SupportZones, MaxZonesPerType);
+   
+   if(ArraySize(ResistanceZones) > MaxZonesPerType)
+      ArrayResize(ResistanceZones, MaxZonesPerType);
+}
+
+//+------------------------------------------------------------------+
+//| Draw Support Zones                                               |
+//+------------------------------------------------------------------+
+void DrawSupportZones()
+{
+   for(int i = 0; i < ArraySize(SupportZones); i++)
+   {
+      string obj_name = IndicatorName + "_Support_" + IntegerToString(i);
+      
+      // Create horizontal line
+      ObjectCreate(0, obj_name, OBJ_HLINE, 0, 0, SupportZones[i].price);
+      ObjectSetInteger(0, obj_name, OBJPROP_COLOR, SupportZones[i].zone_color);
+      ObjectSetInteger(0, obj_name, OBJPROP_STYLE, ZoneStyle);
+      ObjectSetInteger(0, obj_name, OBJPROP_WIDTH, ZoneWidth);
+      ObjectSetInteger(0, obj_name, OBJPROP_BACK, true);
+      
+      // Add label if enabled
+      if(ShowZoneLabels)
+      {
+         string label_name = obj_name + "_Label";
+         ObjectCreate(0, label_name, OBJ_TEXT, 0, TimeCurrent(), SupportZones[i].price);
+         ObjectSetString(0, label_name, OBJPROP_TEXT, 
+                        SupportZones[i].type + " (" + IntegerToString(SupportZones[i].strength) + "%)");
+         ObjectSetInteger(0, label_name, OBJPROP_COLOR, SupportZones[i].zone_color);
+         ObjectSetInteger(0, label_name, OBJPROP_FONTSIZE, 8);
+         ObjectSetInteger(0, label_name, OBJPROP_ANCHOR, ANCHOR_LEFT);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Draw Resistance Zones                                            |
+//+------------------------------------------------------------------+
+void DrawResistanceZones()
+{
+   for(int i = 0; i < ArraySize(ResistanceZones); i++)
+   {
+      string obj_name = IndicatorName + "_Resistance_" + IntegerToString(i);
+      
+      // Create horizontal line
+      ObjectCreate(0, obj_name, OBJ_HLINE, 0, 0, ResistanceZones[i].price);
+      ObjectSetInteger(0, obj_name, OBJPROP_COLOR, ResistanceZones[i].zone_color);
+      ObjectSetInteger(0, obj_name, OBJPROP_STYLE, ZoneStyle);
+      ObjectSetInteger(0, obj_name, OBJPROP_WIDTH, ZoneWidth);
+      ObjectSetInteger(0, obj_name, OBJPROP_BACK, true);
+      
+      // Add label if enabled
+      if(ShowZoneLabels)
+      {
+         string label_name = obj_name + "_Label";
+         ObjectCreate(0, label_name, OBJ_TEXT, 0, TimeCurrent(), ResistanceZones[i].price);
+         ObjectSetString(0, label_name, OBJPROP_TEXT, 
+                        ResistanceZones[i].type + " (" + IntegerToString(ResistanceZones[i].strength) + "%)");
+         ObjectSetInteger(0, label_name, OBJPROP_COLOR, ResistanceZones[i].zone_color);
+         ObjectSetInteger(0, label_name, OBJPROP_FONTSIZE, 8);
+         ObjectSetInteger(0, label_name, OBJPROP_ANCHOR, ANCHOR_LEFT);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Display Market Bias                                              |
+//+------------------------------------------------------------------+
+void DisplayMarketBias()
+{
+   double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   string bias = "NEUTRAL";
+   color bias_color = clrYellow;
+   
+   // Find nearest support and resistance
+   double nearest_support = 0;
+   double nearest_resistance = DBL_MAX;
+   int support_strength = 0;
+   int resistance_strength = 0;
+   
+   for(int i = 0; i < ArraySize(SupportZones); i++)
+   {
+      if(SupportZones[i].price < current_price && SupportZones[i].price > nearest_support)
+      {
+         nearest_support = SupportZones[i].price;
+         support_strength = SupportZones[i].strength;
+      }
+   }
+   
+   for(int i = 0; i < ArraySize(ResistanceZones); i++)
+   {
+      if(ResistanceZones[i].price > current_price && ResistanceZones[i].price < nearest_resistance)
+      {
+         nearest_resistance = ResistanceZones[i].price;
+         resistance_strength = ResistanceZones[i].strength;
+      }
+   }
+   
+   // Determine bias
+   if(nearest_support > 0 && nearest_resistance < DBL_MAX)
+   {
+      double support_distance = current_price - nearest_support;
+      double resistance_distance = nearest_resistance - current_price;
+      
+      if(support_distance < resistance_distance && support_strength > 70)
+      {
+         bias = "BULLISH";
+         bias_color = clrLimeGreen;
+      }
+      else if(resistance_distance < support_distance && resistance_strength > 70)
+      {
+         bias = "BEARISH";
+         bias_color = clrTomato;
+      }
+      else if(support_strength > resistance_strength + 10)
+      {
+         bias = "BULLISH";
+         bias_color = clrLimeGreen;
+      }
+      else if(resistance_strength > support_strength + 10)
+      {
+         bias = "BEARISH";
+         bias_color = clrTomato;
+      }
+   }
+   
+   // Display bias on chart
+   string bias_obj = IndicatorName + "_Bias";
+   ObjectCreate(0, bias_obj, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, bias_obj, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, bias_obj, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(0, bias_obj, OBJPROP_YDISTANCE, 30);
+   ObjectSetString(0, bias_obj, OBJPROP_TEXT, "Market Bias: " + bias);
+   ObjectSetInteger(0, bias_obj, OBJPROP_COLOR, bias_color);
+   ObjectSetInteger(0, bias_obj, OBJPROP_FONTSIZE, 12);
+   ObjectSetString(0, bias_obj, OBJPROP_FONT, "Arial Bold");
+   
+   // Store current bias for alert system
+   CurrentBias = bias;
+}
+
+//+------------------------------------------------------------------+
+//| Check for Trading Signals and Send Alerts                       |
+//+------------------------------------------------------------------+
+void CheckTradingSignals()
+{
+   double current_price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double point_value = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double bounce_distance = BounceDetectionPips * point_value * 10; // Convert pips to points
+   
+   // Prevent spam alerts - minimum 1 minute between alerts
+   if(TimeCurrent() - LastAlertTime < 60) return;
+   
+   bool bullish_signal = false;
+   bool bearish_signal = false;
+   string signal_details = "";
+   
+   // Check for Bullish Signal: Bullish bias + bounce from strong support
+   if(CurrentBias == "BULLISH")
+   {
+      for(int i = 0; i < ArraySize(SupportZones); i++)
+      {
+         if(SupportZones[i].strength >= MinStrengthForAlert)
+         {
+            double support_level = SupportZones[i].price;
+            double distance_to_support = current_price - support_level;
+            
+            // Check if price is bouncing from support
+            if(distance_to_support > 0 && distance_to_support <= bounce_distance)
+            {
+               // Confirm bounce by checking recent price action
+               if(LastPrice > 0 && LastPrice < current_price && LastPrice <= support_level + bounce_distance)
+               {
+                  bullish_signal = true;
+                  signal_details = "BULLISH SIGNAL: Bounce from " + SupportZones[i].type + 
+                                 " at " + DoubleToString(support_level, _Digits) +
+                                 " (Strength: " + IntegerToString(SupportZones[i].strength) + "%)";
+                  break;
+               }
+            }
+         }
+      }
+   }
+   
+   // Check for Bearish Signal: Bearish bias + rejection from strong resistance
+   if(CurrentBias == "BEARISH")
+   {
+      for(int i = 0; i < ArraySize(ResistanceZones); i++)
+      {
+         if(ResistanceZones[i].strength >= MinStrengthForAlert)
+         {
+            double resistance_level = ResistanceZones[i].price;
+            double distance_to_resistance = resistance_level - current_price;
+            
+            // Check if price is rejecting from resistance
+            if(distance_to_resistance > 0 && distance_to_resistance <= bounce_distance)
+            {
+               // Confirm rejection by checking recent price action
+               if(LastPrice > 0 && LastPrice > current_price && LastPrice >= resistance_level - bounce_distance)
+               {
+                  bearish_signal = true;
+                  signal_details = "BEARISH SIGNAL: Rejection from " + ResistanceZones[i].type + 
+                                 " at " + DoubleToString(resistance_level, _Digits) +
+                                 " (Strength: " + IntegerToString(ResistanceZones[i].strength) + "%)";
+                  break;
+               }
+            }
+         }
+      }
+   }
+   
+   // Send alerts for new signals only
+   if(bullish_signal && !PreviousBullishSignal)
+   {
+      SendTradingAlert("🚀 LONG ENTRY SIGNAL", signal_details, "Buy");
+      PreviousBullishSignal = true;
+      PreviousBearishSignal = false;
+      LastAlertTime = TimeCurrent();
+   }
+   else if(bearish_signal && !PreviousBearishSignal)
+   {
+      SendTradingAlert("🔻 SHORT ENTRY SIGNAL", signal_details, "Sell");
+      PreviousBearishSignal = true;
+      PreviousBullishSignal = false;
+      LastAlertTime = TimeCurrent();
+   }
+   else if(!bullish_signal && !bearish_signal)
+   {
+      // Reset signal flags when no signal is present
+      PreviousBullishSignal = false;
+      PreviousBearishSignal = false;
+   }
+   
+   // Update last price for next comparison
+   LastPrice = current_price;
+}
+
+//+------------------------------------------------------------------+
+//| Send Trading Alert                                               |
+//+------------------------------------------------------------------+
+void SendTradingAlert(string title, string message, string direction)
+{
+   string full_message = title + "\n" +
+                        "Symbol: " + _Symbol + "\n" +
+                        "Time: " + TimeToString(TimeCurrent(), TIME_DATE|TIME_MINUTES) + "\n" +
+                        "Direction: " + direction + "\n" +
+                        "Price: " + DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_BID), _Digits) + "\n" +
+                        message + "\n" +
+                        "Market Bias: " + CurrentBias;
+   
+   // Popup Alert
+   if(EnablePopupAlerts)
+   {
+      Alert(full_message);
+   }
+   
+   // Sound Alert
+   if(EnableSoundAlerts)
+   {
+      PlaySound(AlertSoundFile);
+   }
+   
+   // Email Alert
+   if(EnableEmailAlerts)
+   {
+      SendMail(title + " - " + _Symbol, full_message);
+   }
+   
+   // Push Notification
+   if(EnablePushAlerts)
+   {
+      SendNotification(title + " - " + _Symbol + ": " + direction + " at " + 
+                      DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_BID), _Digits));
+   }
+   
+   // Print to Expert tab
+   Print("TRADING ALERT: ", title, " - ", _Symbol, " - ", direction, " at ", 
+         DoubleToString(SymbolInfoDouble(_Symbol, SYMBOL_BID), _Digits));
+}
+
+//+------------------------------------------------------------------+
+//| Additional Signal Confirmation Functions                         |
+//+------------------------------------------------------------------+
+bool IsStrongBounceFromSupport(double support_level, double current_price)
+{
+   // Get recent price data for bounce confirmation
+   MqlRates rates[];
+   int copied = CopyRates(_Symbol, PERIOD_CURRENT, 0, 5, rates);
+   
+   if(copied < 3) return false;
+   
+   // Check if price recently touched support and is now moving up
+   double lowest_recent = rates[1].low;
+   for(int i = 2; i < copied; i++)
+   {
+      if(rates[i].low < lowest_recent)
+         lowest_recent = rates[i].low;
+   }
+   
+   // Confirm bounce conditions
+   bool touched_support = (lowest_recent <= support_level + (support_level * 0.001));
+   bool moving_up = (current_price > rates[1].close);
+   bool volume_increase = (rates[0].tick_volume > rates[1].tick_volume);
+   
+   return (touched_support && moving_up);
+}
+
+bool IsStrongRejectionFromResistance(double resistance_level, double current_price)
+{
+   // Get recent price data for rejection confirmation
+   MqlRates rates[];
+   int copied = CopyRates(_Symbol, PERIOD_CURRENT, 0, 5, rates);
+   
+   if(copied < 3) return false;
+   
+   // Check if price recently touched resistance and is now moving down
+   double highest_recent = rates[1].high;
+   for(int i = 2; i < copied; i++)
+   {
+      if(rates[i].high > highest_recent)
+         highest_recent = rates[i].high;
+   }
+   
+   // Confirm rejection conditions
+   bool touched_resistance = (highest_recent >= resistance_level - (resistance_level * 0.001));
+   bool moving_down = (current_price < rates[1].close);
+   bool volume_increase = (rates[0].tick_volume > rates[1].tick_volume);
+   
+   return (touched_resistance && moving_down);
+}
+
+//+------------------------------------------------------------------+
