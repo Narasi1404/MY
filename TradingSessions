@@ -1,0 +1,203 @@
+//+------------------------------------------------------------------+
+//|                                            TradingSessions.mq5 |
+//|                                   Copyright 2024, Trading Bot |
+//|                                                                  |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2024, Trading Bot"
+#property link      ""
+#property version   "1.00"
+#property indicator_chart_window
+#property indicator_buffers 0
+#property indicator_plots   0
+
+//--- Input parameters
+input color Asian_Color = clrBlue;           // Asian Session Color
+input color London_Color = clrGreen;         // London Session Color  
+input color NewYork_Color = clrRed;          // New York Session Color
+input int Line_Width = 2;                    // Line Width
+input ENUM_LINE_STYLE Line_Style = STYLE_SOLID; // Line Style
+input bool Show_Session_Names = true;        // Show Session Names
+input int Font_Size = 10;                    // Font Size for Labels
+
+//--- Global variables
+string prefix = "TradingSessions_";
+datetime last_bar_time = 0;
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    IndicatorSetString(INDICATOR_SHORTNAME, "Trading Sessions");
+    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator deinitialization function                      |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    DeleteAllObjects();
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+    // Check if new bar appeared
+    if(rates_total > 0 && time[rates_total-1] != last_bar_time)
+    {
+        last_bar_time = time[rates_total-1];
+        DrawSessionLines();
+    }
+    
+    return(rates_total);
+}
+
+//+------------------------------------------------------------------+
+//| Draw session lines for visible chart period                     |
+//+------------------------------------------------------------------+
+void DrawSessionLines()
+{
+    // Get visible time range
+    long chart_id = ChartID();
+    int visible_bars = (int)ChartGetInteger(chart_id, CHART_VISIBLE_BARS);
+    datetime start_time = (datetime)ChartGetInteger(chart_id, CHART_FIRST_VISIBLE_BAR);
+    
+    // Get chart time range
+    datetime chart_start = iTime(_Symbol, PERIOD_CURRENT, visible_bars);
+    datetime chart_end = TimeCurrent();
+    
+    // Loop through days in visible range
+    for(datetime day = chart_start; day <= chart_end; day += 86400) // 86400 = 1 day in seconds
+    {
+        MqlDateTime dt;
+        TimeToStruct(day, dt);
+        dt.hour = 0;
+        dt.min = 0;
+        dt.sec = 0;
+        datetime day_start = StructToTime(dt);
+        
+        DrawDailySessionLines(day_start);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Draw session lines for a specific day                           |
+//+------------------------------------------------------------------+
+void DrawDailySessionLines(datetime day_start)
+{
+    string date_str = TimeToString(day_start, TIME_DATE);
+    
+    // Asian Session: 00:00 - 09:00 GMT
+    datetime asian_start = day_start;
+    datetime asian_end = day_start + 9 * 3600; // 9 hours
+    
+    // London Session: 08:00 - 17:00 GMT  
+    datetime london_start = day_start + 8 * 3600; // 8 hours
+    datetime london_end = day_start + 17 * 3600; // 17 hours
+    
+    // New York Session: 13:00 - 22:00 GMT
+    datetime newyork_start = day_start + 13 * 3600; // 13 hours
+    datetime newyork_end = day_start + 22 * 3600; // 22 hours
+    
+    // Draw Asian Session
+    DrawSessionLine(asian_start, "Asian_Start_" + date_str, Asian_Color, "ASIAN");
+    DrawSessionLine(asian_end, "Asian_End_" + date_str, Asian_Color, "");
+    
+    // Draw London Session  
+    DrawSessionLine(london_start, "London_Start_" + date_str, London_Color, "LONDON");
+    DrawSessionLine(london_end, "London_End_" + date_str, London_Color, "");
+    
+    // Draw New York Session
+    DrawSessionLine(newyork_start, "NewYork_Start_" + date_str, NewYork_Color, "NEW YORK");
+    DrawSessionLine(newyork_end, "NewYork_End_" + date_str, NewYork_Color, "");
+}
+
+//+------------------------------------------------------------------+
+//| Draw vertical line at specified time                            |
+//+------------------------------------------------------------------+
+void DrawSessionLine(datetime line_time, string obj_name, color line_color, string session_name)
+{
+    string full_name = prefix + obj_name;
+    
+    // Delete existing object
+    ObjectDelete(0, full_name);
+    
+    // Create vertical line
+    if(ObjectCreate(0, full_name, OBJ_VLINE, 0, line_time, 0))
+    {
+        ObjectSetInteger(0, full_name, OBJPROP_COLOR, line_color);
+        ObjectSetInteger(0, full_name, OBJPROP_WIDTH, Line_Width);
+        ObjectSetInteger(0, full_name, OBJPROP_STYLE, Line_Style);
+        ObjectSetInteger(0, full_name, OBJPROP_BACK, true);
+        ObjectSetInteger(0, full_name, OBJPROP_SELECTABLE, false);
+        ObjectSetInteger(0, full_name, OBJPROP_HIDDEN, true);
+    }
+    
+    // Add session name label at the top if specified
+    if(Show_Session_Names && session_name != "")
+    {
+        string label_name = prefix + "Label_" + session_name + "_" + TimeToString(line_time, TIME_DATE);
+        
+        // Delete existing label
+        ObjectDelete(0, label_name);
+        
+        // Get chart high price for positioning
+        double chart_high = ChartGetDouble(0, CHART_PRICE_MAX);
+        double chart_low = ChartGetDouble(0, CHART_PRICE_MIN);
+        double label_price = chart_high - (chart_high - chart_low) * 0.05; // 5% from top
+        
+        if(ObjectCreate(0, label_name, OBJ_TEXT, 0, line_time, label_price))
+        {
+            ObjectSetString(0, label_name, OBJPROP_TEXT, session_name);
+            ObjectSetInteger(0, label_name, OBJPROP_COLOR, line_color);
+            ObjectSetInteger(0, label_name, OBJPROP_FONTSIZE, Font_Size);
+            ObjectSetString(0, label_name, OBJPROP_FONT, "Arial Bold");
+            ObjectSetInteger(0, label_name, OBJPROP_ANCHOR, ANCHOR_LEFT_UPPER);
+            ObjectSetInteger(0, label_name, OBJPROP_SELECTABLE, false);
+            ObjectSetInteger(0, label_name, OBJPROP_HIDDEN, true);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Delete all indicator objects                                     |
+//+------------------------------------------------------------------+
+void DeleteAllObjects()
+{
+    int total = ObjectsTotal(0);
+    for(int i = total - 1; i >= 0; i--)
+    {
+        string obj_name = ObjectName(0, i);
+        if(StringFind(obj_name, prefix) == 0)
+        {
+            ObjectDelete(0, obj_name);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Chart event handler                                              |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id,
+                  const long& lparam,
+                  const double& dparam,
+                  const string& sparam)
+{
+    // Redraw lines when chart is scrolled or zoomed
+    if(id == CHARTEVENT_CHART_CHANGE)
+    {
+        DrawSessionLines();
+    }
+}
