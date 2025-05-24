@@ -1,0 +1,276 @@
+//+------------------------------------------------------------------+
+//|                                            VolumeSignalIndicator.mq5 |
+//|                                  Copyright 2024, MetaQuotes Ltd. |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2024, MetaQuotes Ltd."
+#property link      "https://www.mql5.com"
+#property version   "1.00"
+#property indicator_separate_window
+#property indicator_buffers 4
+#property indicator_plots   4
+
+//--- plot Buy Signal
+#property indicator_label1  "Buy Signal"
+#property indicator_type1   DRAW_ARROW
+#property indicator_color1  clrLime
+#property indicator_style1  STYLE_SOLID
+#property indicator_width1  3
+
+//--- plot Sell Signal
+#property indicator_label2  "Sell Signal"
+#property indicator_type2   DRAW_ARROW
+#property indicator_color2  clrRed
+#property indicator_style2  STYLE_SOLID
+#property indicator_width2  3
+
+//--- plot Volume
+#property indicator_label3  "Volume"
+#property indicator_type3   DRAW_HISTOGRAM
+#property indicator_color3  clrBlue
+#property indicator_style3  STYLE_SOLID
+#property indicator_width3  1
+
+//--- plot Volume MA
+#property indicator_label4  "Volume MA"
+#property indicator_type4   DRAW_LINE
+#property indicator_color4  clrYellow
+#property indicator_style4  STYLE_SOLID
+#property indicator_width4  2
+
+//--- Input parameters
+input int      VolumeMAPeriod = 20;        // Volume MA Period
+input double   VolumeMultiplier = 1.5;     // Volume Multiplier for Signal
+input int      PriceMAPeriod = 14;         // Price MA Period for Trend
+input bool     UseVolumeSpike = true;      // Use Volume Spike Filter
+input bool     UseTrendFilter = true;      // Use Trend Filter
+input bool     ShowAlerts = true;          // Show Alerts
+
+//--- Indicator buffers
+double BuySignalBuffer[];
+double SellSignalBuffer[];
+double VolumeBuffer[];
+double VolumeMABuffer[];
+
+//--- Global variables
+int volumeMA_handle;
+int priceMA_handle;
+datetime lastAlertTime = 0;
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    //--- Set indicator buffers
+    SetIndexBuffer(0, BuySignalBuffer, INDICATOR_DATA);
+    SetIndexBuffer(1, SellSignalBuffer, INDICATOR_DATA);
+    SetIndexBuffer(2, VolumeBuffer, INDICATOR_DATA);
+    SetIndexBuffer(3, VolumeMABuffer, INDICATOR_DATA);
+    
+    //--- Set arrow codes
+    PlotIndexSetInteger(0, PLOT_ARROW, 233); // Up arrow for buy
+    PlotIndexSetInteger(1, PLOT_ARROW, 234); // Down arrow for sell
+    
+    //--- Set empty values
+    PlotIndexSetDouble(0, PLOT_EMPTY_VALUE, 0);
+    PlotIndexSetDouble(1, PLOT_EMPTY_VALUE, 0);
+    PlotIndexSetDouble(2, PLOT_EMPTY_VALUE, 0);
+    PlotIndexSetDouble(3, PLOT_EMPTY_VALUE, 0);
+    
+    //--- Initialize MA handles
+    volumeMA_handle = iMA(NULL, 0, VolumeMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
+    if(UseTrendFilter)
+        priceMA_handle = iMA(NULL, 0, PriceMAPeriod, 0, MODE_SMA, PRICE_CLOSE);
+    
+    //--- Check handles
+    if(volumeMA_handle == INVALID_HANDLE)
+    {
+        Print("Error creating Volume MA handle");
+        return INIT_FAILED;
+    }
+    
+    if(UseTrendFilter && priceMA_handle == INVALID_HANDLE)
+    {
+        Print("Error creating Price MA handle");
+        return INIT_FAILED;
+    }
+    
+    //--- Set indicator name
+    IndicatorSetString(INDICATOR_SHORTNAME, "Volume Signal (" + 
+                      IntegerToString(VolumeMAPeriod) + "," + 
+                      DoubleToString(VolumeMultiplier, 1) + ")");
+    
+    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+    //--- Check for minimum bars
+    if(rates_total < VolumeMAPeriod + 1)
+        return 0;
+    
+    //--- Calculate start position
+    int start = prev_calculated;
+    if(start == 0)
+        start = VolumeMAPeriod;
+    
+    //--- Get volume MA values
+    double volumeMA[];
+    ArraySetAsSeries(volumeMA, true);
+    if(CopyBuffer(volumeMA_handle, 0, 0, rates_total, volumeMA) <= 0)
+        return 0;
+    
+    //--- Get price MA values if trend filter is enabled
+    double priceMA[];
+    if(UseTrendFilter)
+    {
+        ArraySetAsSeries(priceMA, true);
+        if(CopyBuffer(priceMA_handle, 0, 0, rates_total, priceMA) <= 0)
+            return 0;
+    }
+    
+    //--- Set arrays as series
+    ArraySetAsSeries(time, true);
+    ArraySetAsSeries(open, true);
+    ArraySetAsSeries(high, true);
+    ArraySetAsSeries(low, true);
+    ArraySetAsSeries(close, true);
+    ArraySetAsSeries(tick_volume, true);
+    ArraySetAsSeries(volume, true);
+    
+    //--- Main calculation loop
+    for(int i = start; i < rates_total; i++)
+    {
+        int pos = rates_total - 1 - i;
+        
+        //--- Initialize buffers
+        BuySignalBuffer[pos] = 0;
+        SellSignalBuffer[pos] = 0;
+        
+        //--- Copy volume data
+        if(volume[pos] > 0)
+            VolumeBuffer[pos] = (double)volume[pos];
+        else
+            VolumeBuffer[pos] = (double)tick_volume[pos];
+            
+        VolumeMABuffer[pos] = volumeMA[pos];
+        
+        //--- Skip if not enough data
+        if(pos >= rates_total - VolumeMAPeriod)
+            continue;
+        
+        //--- Calculate volume conditions
+        bool volumeSpike = false;
+        if(UseVolumeSpike)
+        {
+            volumeSpike = VolumeBuffer[pos] > (VolumeMABuffer[pos] * VolumeMultiplier);
+        }
+        else
+        {
+            volumeSpike = true; // Always true if not using volume spike filter
+        }
+        
+        //--- Calculate trend conditions
+        bool upTrend = true;
+        bool downTrend = true;
+        
+        if(UseTrendFilter && pos < rates_total - 1)
+        {
+            upTrend = close[pos] > priceMA[pos];
+            downTrend = close[pos] < priceMA[pos];
+        }
+        
+        //--- Price action conditions
+        bool bullishCandle = close[pos] > open[pos];
+        bool bearishCandle = close[pos] < open[pos];
+        
+        //--- Additional volume confirmation
+        bool volumeIncreasing = false;
+        if(pos < rates_total - 1)
+        {
+            volumeIncreasing = VolumeBuffer[pos] > VolumeBuffer[pos + 1];
+        }
+        
+        //--- Generate Buy Signal
+        if(volumeSpike && bullishCandle && upTrend && volumeIncreasing)
+        {
+            BuySignalBuffer[pos] = VolumeBuffer[pos];
+            
+            //--- Send alert
+            if(ShowAlerts && pos == 0 && time[pos] != lastAlertTime)
+            {
+                Alert("Volume Buy Signal on ", Symbol(), " M1 at ", TimeToString(time[pos]));
+                lastAlertTime = time[pos];
+            }
+        }
+        
+        //--- Generate Sell Signal
+        if(volumeSpike && bearishCandle && downTrend && volumeIncreasing)
+        {
+            SellSignalBuffer[pos] = VolumeBuffer[pos];
+            
+            //--- Send alert
+            if(ShowAlerts && pos == 0 && time[pos] != lastAlertTime)
+            {
+                Alert("Volume Sell Signal on ", Symbol(), " M1 at ", TimeToString(time[pos]));
+                lastAlertTime = time[pos];
+            }
+        }
+    }
+    
+    return rates_total;
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator deinitialization function                      |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    //--- Release handles
+    if(volumeMA_handle != INVALID_HANDLE)
+        IndicatorRelease(volumeMA_handle);
+    if(priceMA_handle != INVALID_HANDLE)
+        IndicatorRelease(priceMA_handle);
+}
+
+//+------------------------------------------------------------------+
+//| Get indicator values function                                    |
+//+------------------------------------------------------------------+
+bool GetSignal(int shift, int &signal)
+{
+    if(shift < 0 || shift >= Bars(Symbol(), Period()))
+        return false;
+    
+    signal = 0;
+    
+    if(BuySignalBuffer[shift] > 0)
+        signal = 1;  // Buy signal
+    else if(SellSignalBuffer[shift] > 0)
+        signal = -1; // Sell signal
+    
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| Check for new signal function                                   |
+//+------------------------------------------------------------------+
+int CheckNewSignal()
+{
+    int signal = 0;
+    if(GetSignal(0, signal))
+        return signal;
+    return 0;
+}
