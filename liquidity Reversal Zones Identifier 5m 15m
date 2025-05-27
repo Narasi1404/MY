@@ -1,0 +1,352 @@
+//+------------------------------------------------------------------+
+//|                                         Main Reversal Zones Identifier |
+//|                                                   Copyright 2025, Claude AI |
+//|                                                 Professional Trading Tools |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025, Claude AI"
+#property link      ""
+#property version   "1.00"
+#property description "Main Reversal Zones - Identifies key  institutional reversal points"
+#property indicator_chart_window
+#property indicator_buffers 4
+#property indicator_plots   2
+
+//--- Plot settings
+#property indicator_label1  "Reversal High"
+#property indicator_type1   DRAW_ARROW
+#property indicator_color1  clrRed
+#property indicator_style1  STYLE_SOLID
+#property indicator_width1  3
+
+#property indicator_label2  "Reversal Low"
+#property indicator_type2   DRAW_ARROW
+#property indicator_color2  clrLime
+#property indicator_style2  STYLE_SOLID
+#property indicator_width2  3
+
+//--- Input parameters
+input group "=== Main Reversal Detection ==="
+input int      SwingStrength = 5;             // Swing strength (higher = fewer signals)
+input double   VolumeMultiplier = 2.0;        // Volume threshold for main zones
+input double   ATRMultiplier = 1.5;           // ATR multiplier for significance
+input int      MinBarsApart = 10;             // Minimum bars between signals
+
+input group "=== Zone Drawing ==="
+input bool     DrawReversalZones = true;      // Draw reversal zone rectangles
+input int      ZoneExtension = 100;           // Zone extension in bars
+input color    BearishZoneColor = clrMaroon;  // Bearish reversal zone color
+input color    BullishZoneColor = clrDarkGreen; // Bullish reversal zone color
+input ENUM_LINE_STYLE ZoneStyle = STYLE_DOT;   // Zone border style
+
+input group "=== Alerts ==="
+input bool     EnableAlerts = true;           // Enable alerts for main reversals
+input string   AlertSound = "alert2.wav";     // Alert sound file
+
+//--- Indicator buffers
+double ReversalHighBuffer[];
+double ReversalLowBuffer[];
+double SwingHighBuffer[];
+double SwingLowBuffer[];
+
+//--- Global variables
+int ATRHandle;
+int VolumeHandle;
+datetime LastHighAlert, LastLowAlert;
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    //--- Set buffer arrays
+    SetIndexBuffer(0, ReversalHighBuffer, INDICATOR_DATA);
+    SetIndexBuffer(1, ReversalLowBuffer, INDICATOR_DATA);
+    SetIndexBuffer(2, SwingHighBuffer, INDICATOR_CALCULATIONS);
+    SetIndexBuffer(3, SwingLowBuffer, INDICATOR_CALCULATIONS);
+    
+    //--- Set arrow codes
+    PlotIndexSetInteger(0, PLOT_ARROW, 164);  // Down arrow for reversal high
+    PlotIndexSetInteger(1, PLOT_ARROW, 164);  // Up arrow for reversal low
+    
+    //--- Initialize arrays as series
+    ArraySetAsSeries(ReversalHighBuffer, true);
+    ArraySetAsSeries(ReversalLowBuffer, true);
+    ArraySetAsSeries(SwingHighBuffer, true);
+    ArraySetAsSeries(SwingLowBuffer, true);
+    
+    //--- Get ATR handle
+    ATRHandle = iATR(_Symbol, _Period, 14);
+    if(ATRHandle == INVALID_HANDLE)
+    {
+        Print("Failed to create ATR handle");
+        return INIT_FAILED;
+    }
+    
+    //--- Get volume handle
+    VolumeHandle = iVolumes(_Symbol, _Period, VOLUME_TICK);
+    if(VolumeHandle == INVALID_HANDLE)
+    {
+        Print("Failed to create volume handle");
+        return INIT_FAILED;
+    }
+    
+    //--- Set indicator name
+    IndicatorSetString(INDICATOR_SHORTNAME, "Main Reversal Zones");
+    IndicatorSetInteger(INDICATOR_DIGITS, _Digits);
+    
+    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator deinitialization function                      |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    if(ATRHandle != INVALID_HANDLE) IndicatorRelease(ATRHandle);
+    if(VolumeHandle != INVALID_HANDLE) IndicatorRelease(VolumeHandle);
+    ObjectsDeleteAll(0, "REV_");
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+    if(rates_total < SwingStrength * 2 + 20) return 0;
+    
+    //--- Set arrays as series
+    ArraySetAsSeries(high, true);
+    ArraySetAsSeries(low, true);
+    ArraySetAsSeries(close, true);
+    ArraySetAsSeries(time, true);
+    ArraySetAsSeries(tick_volume, true);
+    
+    //--- Get ATR and Volume data
+    double atrBuffer[];
+    double volumeBuffer[];
+    ArraySetAsSeries(atrBuffer, true);
+    ArraySetAsSeries(volumeBuffer, true);
+    
+    if(CopyBuffer(ATRHandle, 0, 0, rates_total, atrBuffer) <= 0) return 0;
+    if(CopyBuffer(VolumeHandle, 0, 0, rates_total, volumeBuffer) <= 0) return 0;
+    
+    int start = prev_calculated > 0 ? prev_calculated - 1 : SwingStrength + 10;
+    
+    for(int i = start; i < rates_total - SwingStrength; i++)
+    {
+        int pos = rates_total - 1 - i;
+        
+        //--- Clear buffers
+        ReversalHighBuffer[pos] = EMPTY_VALUE;
+        ReversalLowBuffer[pos] = EMPTY_VALUE;
+        
+        if(pos < SwingStrength || pos >= rates_total - SwingStrength) continue;
+        
+        //--- Check for main reversal zones
+        CheckMainReversalZones(pos, high, low, close, time, tick_volume, atrBuffer, volumeBuffer, rates_total);
+    }
+    
+    return rates_total;
+}
+
+//+------------------------------------------------------------------+
+//| Check for main reversal zones                                   |
+//+------------------------------------------------------------------+
+void CheckMainReversalZones(int pos, const double &high[], const double &low[], const double &close[],
+                           const datetime &time[], const long &tick_volume[], 
+                           const double &atr[], const double &volume[], int rates_total)
+{
+    //--- Check for significant swing high
+    if(IsSignificantSwingHigh(pos, high, tick_volume, atr, volume, rates_total))
+    {
+        //--- Ensure minimum distance from last signal
+        if(IsValidSignalDistance(pos, time, true))
+        {
+            ReversalHighBuffer[pos] = high[pos] + (20 * _Point);
+            
+            if(DrawReversalZones)
+                DrawReversalZone(pos, time, high[pos], true, atr[pos]);
+                
+            if(EnableAlerts)
+                SendReversalAlert("MAIN REVERSAL HIGH", time[pos], high[pos], true);
+        }
+    }
+    
+    //--- Check for significant swing low
+    if(IsSignificantSwingLow(pos, low, tick_volume, atr, volume, rates_total))
+    {
+        //--- Ensure minimum distance from last signal
+        if(IsValidSignalDistance(pos, time, false))
+        {
+            ReversalLowBuffer[pos] = low[pos] - (20 * _Point);
+            
+            if(DrawReversalZones)
+                DrawReversalZone(pos, time, low[pos], false, atr[pos]);
+                
+            if(EnableAlerts)
+                SendReversalAlert("MAIN REVERSAL LOW", time[pos], low[pos], false);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Check if swing high is significant enough for main reversal     |
+//+------------------------------------------------------------------+
+bool IsSignificantSwingHigh(int pos, const double &high[], const long &tick_volume[], 
+                           const double &atr[], const double &volume[], int rates_total)
+{
+    //--- Check if it's a valid swing high
+    bool isSwingHigh = true;
+    for(int i = 1; i <= SwingStrength; i++)
+    {
+        if(pos + i >= rates_total || pos - i < 0) return false;
+        if(high[pos] <= high[pos + i] || high[pos] <= high[pos - i])
+        {
+            isSwingHigh = false;
+            break;
+        }
+    }
+    
+    if(!isSwingHigh) return false;
+    
+    //--- Check volume significance
+    double avgVolume = CalculateAverageVolume(pos, volume, 20, rates_total);
+    if((double)tick_volume[pos] < avgVolume * VolumeMultiplier) return false;
+    
+    //--- Check price significance (using ATR)
+    double priceRange = 0;
+    for(int i = 1; i <= SwingStrength; i++)
+    {
+        if(pos + i >= rates_total) break;
+        priceRange = MathMax(priceRange, high[pos] - high[pos + i]);
+        priceRange = MathMax(priceRange, high[pos] - high[pos - i]);
+    }
+    
+    return priceRange >= atr[pos] * ATRMultiplier;
+}
+
+//+------------------------------------------------------------------+
+//| Check if swing low is significant enough for main reversal      |
+//+------------------------------------------------------------------+
+bool IsSignificantSwingLow(int pos, const double &low[], const long &tick_volume[], 
+                          const double &atr[], const double &volume[], int rates_total)
+{
+    //--- Check if it's a valid swing low
+    bool isSwingLow = true;
+    for(int i = 1; i <= SwingStrength; i++)
+    {
+        if(pos + i >= rates_total || pos - i < 0) return false;
+        if(low[pos] >= low[pos + i] || low[pos] >= low[pos - i])
+        {
+            isSwingLow = false;
+            break;
+        }
+    }
+    
+    if(!isSwingLow) return false;
+    
+    //--- Check volume significance
+    double avgVolume = CalculateAverageVolume(pos, volume, 20, rates_total);
+    if((double)tick_volume[pos] < avgVolume * VolumeMultiplier) return false;
+    
+    //--- Check price significance (using ATR)
+    double priceRange = 0;
+    for(int i = 1; i <= SwingStrength; i++)
+    {
+        if(pos + i >= rates_total) break;
+        priceRange = MathMax(priceRange, low[pos + i] - low[pos]);
+        priceRange = MathMax(priceRange, low[pos - i] - low[pos]);
+    }
+    
+    return priceRange >= atr[pos] * ATRMultiplier;
+}
+
+//+------------------------------------------------------------------+
+//| Check if signal distance is valid                               |
+//+------------------------------------------------------------------+
+bool IsValidSignalDistance(int pos, const datetime &time[], bool isHigh)
+{
+    datetime currentTime = time[pos];
+    datetime lastAlert = isHigh ? LastHighAlert : LastLowAlert;
+    
+    int barsDifference = (int)((currentTime - lastAlert) / PeriodSeconds());
+    
+    if(barsDifference >= MinBarsApart)
+    {
+        if(isHigh) LastHighAlert = currentTime;
+        else LastLowAlert = currentTime;
+        return true;
+    }
+    
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate average volume                                         |
+//+------------------------------------------------------------------+
+double CalculateAverageVolume(int pos, const double &volume[], int period, int rates_total)
+{
+    double sum = 0;
+    int count = 0;
+    
+    for(int i = 0; i < period; i++)
+    {
+        if(pos + i >= rates_total) break;
+        sum += volume[pos + i];
+        count++;
+    }
+    
+    return count > 0 ? sum / count : 0;
+}
+
+//+------------------------------------------------------------------+
+//| Draw reversal zone                                               |
+//+------------------------------------------------------------------+
+void DrawReversalZone(int pos, const datetime &time[], double price, bool isBearish, double atrValue)
+{
+    string objName = "REV_ZONE_" + TimeToString(time[pos]) + "_" + DoubleToString(price, _Digits);
+    
+    ObjectDelete(0, objName);
+    
+    //--- Calculate zone boundaries
+    double zoneHeight = atrValue * 0.5;  // Zone height based on ATR
+    double upperPrice = isBearish ? price : price + zoneHeight;
+    double lowerPrice = isBearish ? price - zoneHeight : price;
+    
+    datetime startTime = time[pos];
+    datetime endTime = startTime + ZoneExtension * PeriodSeconds();
+    
+    //--- Create rectangle
+    if(!ObjectCreate(0, objName, OBJ_RECTANGLE, 0, startTime, upperPrice, endTime, lowerPrice))
+        return;
+    
+    //--- Set rectangle properties
+    color zoneColor = isBearish ? BearishZoneColor : BullishZoneColor;
+    ObjectSetInteger(0, objName, OBJPROP_COLOR, zoneColor);
+    ObjectSetInteger(0, objName, OBJPROP_STYLE, ZoneStyle);
+    ObjectSetInteger(0, objName, OBJPROP_WIDTH, 2);
+    ObjectSetInteger(0, objName, OBJPROP_FILL, false);
+    ObjectSetInteger(0, objName, OBJPROP_BACK, true);
+    ObjectSetString(0, objName, OBJPROP_TOOLTIP, "Main Reversal Zone");
+}
+
+//+------------------------------------------------------------------+
+//| Send reversal alert                                              |
+//+------------------------------------------------------------------+
+void SendReversalAlert(string message, datetime time, double price, bool isHigh)
+{
+    string fullMessage = message + " at " + DoubleToString(price, _Digits) + " on " + _Symbol;
+    
+    if(AlertSound != "") PlaySound(AlertSound);
+    Alert(fullMessage);
+    Print("*** " + fullMessage + " ***");
+}
