@@ -39,7 +39,7 @@ input color    BullishZoneColor = clrDarkGreen; // Bullish reversal zone color
 input ENUM_LINE_STYLE ZoneStyle = STYLE_DOT;   // Zone border style
 
 input group "=== Alerts ==="
-input bool     EnableAlerts = true;           // Enable alerts for main reversals
+input bool     EnableAlerts = true;           // Disable alerts for main reversals
 input string   AlertSound = "alert2.wav";     // Alert sound file
 
 //--- Indicator buffers
