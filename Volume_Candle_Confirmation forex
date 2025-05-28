@@ -1,0 +1,296 @@
+//+------------------------------------------------------------------+
+//|                                    Volume_Candle_Confirmation.mq5 |
+//|                                                      Your Name     |
+//|                                             https://www.mql5.com   |
+//+------------------------------------------------------------------+
+#property copyright "Your Name"
+#property link      "https://www.mql5.com"
+#property version   "1.00"
+#property indicator_separate_window
+#property indicator_buffers 6
+#property indicator_plots   3
+
+// Plot settings
+#property indicator_label1  "Bullish Signal"
+#property indicator_type1   DRAW_ARROW
+#property indicator_color1  clrLime
+#property indicator_style1  STYLE_SOLID
+#property indicator_width1  2
+
+#property indicator_label2  "Bearish Signal"
+#property indicator_type2   DRAW_ARROW
+#property indicator_color2  clrRed
+#property indicator_style2  STYLE_SOLID
+#property indicator_width2  2
+
+#property indicator_label3  "Volume Histogram"
+#property indicator_type3   DRAW_HISTOGRAM
+#property indicator_color3  clrBlue
+#property indicator_style3  STYLE_SOLID
+#property indicator_width3  1
+
+// Input parameters
+input int      VolumePeriod = 20;           // Volume moving average period
+input double   VolumeThreshold = 1.5;      // Volume threshold multiplier
+input int      MinCandleSize = 10;         // Minimum candle size in points
+input bool     ShowVolumeHistogram = true; // Show volume histogram
+input bool     AlertsEnabled = true;       // Enable alerts
+input bool     ShowBullishPatterns = true; // Show bullish patterns
+input bool     ShowBearishPatterns = true; // Show bearish patterns
+
+// Indicator buffers
+double BullishSignalBuffer[];
+double BearishSignalBuffer[];
+double VolumeBuffer[];
+double VolumeMABuffer[];
+double TempBuffer1[];
+double TempBuffer2[];
+
+// Global variables
+int volumeMA_handle;
+datetime lastAlertTime = 0;
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    // Set indicator buffers
+    SetIndexBuffer(0, BullishSignalBuffer, INDICATOR_DATA);
+    SetIndexBuffer(1, BearishSignalBuffer, INDICATOR_DATA);
+    SetIndexBuffer(2, VolumeBuffer, INDICATOR_DATA);
+    SetIndexBuffer(3, VolumeMABuffer, INDICATOR_CALCULATIONS);
+    SetIndexBuffer(4, TempBuffer1, INDICATOR_CALCULATIONS);
+    SetIndexBuffer(5, TempBuffer2, INDICATOR_CALCULATIONS);
+    
+    // Set arrow codes
+    PlotIndexSetInteger(0, PLOT_ARROW, 233); // Up arrow for bullish
+    PlotIndexSetInteger(1, PLOT_ARROW, 234); // Down arrow for bearish
+    
+    // Set empty values
+    PlotIndexSetDouble(0, PLOT_EMPTY_VALUE, 0.0);
+    PlotIndexSetDouble(1, PLOT_EMPTY_VALUE, 0.0);
+    PlotIndexSetDouble(2, PLOT_EMPTY_VALUE, 0.0);
+    
+    // Initialize arrays
+    ArraySetAsSeries(BullishSignalBuffer, true);
+    ArraySetAsSeries(BearishSignalBuffer, true);
+    ArraySetAsSeries(VolumeBuffer, true);
+    ArraySetAsSeries(VolumeMABuffer, true);
+    
+    // Create volume moving average handle
+    volumeMA_handle = iMA(Symbol(), Period(), VolumePeriod, 0, MODE_SMA, VOLUME_TICK);
+    if(volumeMA_handle == INVALID_HANDLE)
+    {
+        Print("Failed to create volume MA handle");
+        return INIT_FAILED;
+    }
+    
+    // Set indicator name
+    IndicatorSetString(INDICATOR_SHORTNAME, "Volume Candle Confirmation");
+    
+    // Set minimum values for calculation
+    IndicatorSetInteger(INDICATOR_DIGITS, _Digits);
+    
+    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+    // Check if we have enough data
+    if(rates_total < VolumePeriod + 5)
+        return 0;
+    
+    // Set arrays as series
+    ArraySetAsSeries(open, true);
+    ArraySetAsSeries(high, true);
+    ArraySetAsSeries(low, true);
+    ArraySetAsSeries(close, true);
+    ArraySetAsSeries(tick_volume, true);
+    ArraySetAsSeries(time, true);
+    
+    // Get volume MA data
+    int copied = CopyBuffer(volumeMA_handle, 0, 0, rates_total, VolumeMABuffer);
+    if(copied <= 0)
+        return 0;
+    
+    // Calculate start position
+    int start = MathMax(prev_calculated - 1, VolumePeriod);
+    if(start < VolumePeriod)
+        start = VolumePeriod;
+    
+    // Main calculation loop
+    for(int i = start; i < rates_total - 1; i++)
+    {
+        int pos = rates_total - 1 - i;
+        
+        // Initialize buffers
+        BullishSignalBuffer[pos] = 0.0;
+        BearishSignalBuffer[pos] = 0.0;
+        VolumeBuffer[pos] = ShowVolumeHistogram ? (double)tick_volume[pos] : 0.0;
+        
+        // Check volume confirmation
+        bool volumeConfirmed = (double)tick_volume[pos] > VolumeMABuffer[pos] * VolumeThreshold;
+        
+        // Analyze candlestick patterns
+        if(volumeConfirmed)
+        {
+            // Check for bullish patterns
+            if(ShowBullishPatterns && IsBullishPattern(pos, open, high, low, close))
+            {
+                BullishSignalBuffer[pos] = low[pos] - (high[pos] - low[pos]) * 0.3;
+                
+                // Send alert
+                if(AlertsEnabled && pos == 0 && time[pos] != lastAlertTime)
+                {
+                    Alert("Bullish Volume-Confirmed Pattern on ", Symbol(), " ", GetTimeframeString());
+                    lastAlertTime = time[pos];
+                }
+            }
+            
+            // Check for bearish patterns
+            if(ShowBearishPatterns && IsBearishPattern(pos, open, high, low, close))
+            {
+                BearishSignalBuffer[pos] = high[pos] + (high[pos] - low[pos]) * 0.3;
+                
+                // Send alert
+                if(AlertsEnabled && pos == 0 && time[pos] != lastAlertTime)
+                {
+                    Alert("Bearish Volume-Confirmed Pattern on ", Symbol(), " ", GetTimeframeString());
+                    lastAlertTime = time[pos];
+                }
+            }
+        }
+    }
+    
+    return rates_total;
+}
+
+//+------------------------------------------------------------------+
+//| Check for bullish candlestick patterns                          |
+//+------------------------------------------------------------------+
+bool IsBullishPattern(int pos, const double &open[], const double &high[], 
+                      const double &low[], const double &close[])
+{
+    if(pos >= ArraySize(open) - 2) return false;
+    
+    double candleSize = MathAbs(close[pos] - open[pos]) / _Point;
+    if(candleSize < MinCandleSize) return false;
+    
+    // Bullish Engulfing
+    if(close[pos+1] < open[pos+1] && // Previous candle bearish
+       close[pos] > open[pos] &&     // Current candle bullish
+       open[pos] < close[pos+1] &&   // Current open below previous close
+       close[pos] > open[pos+1])     // Current close above previous open
+        return true;
+    
+    // Hammer pattern
+    double body = MathAbs(close[pos] - open[pos]);
+    double lowerShadow = MathMin(open[pos], close[pos]) - low[pos];
+    double upperShadow = high[pos] - MathMax(open[pos], close[pos]);
+    
+    if(lowerShadow > body * 2 && upperShadow < body * 0.5)
+        return true;
+    
+    // Morning Star (3-candle pattern)
+    if(pos < ArraySize(open) - 3)
+    {
+        if(close[pos+2] < open[pos+2] &&                    // First candle bearish
+           MathAbs(close[pos+1] - open[pos+1]) < body * 0.3 && // Middle candle small
+           close[pos] > open[pos] &&                        // Third candle bullish
+           close[pos] > (open[pos+2] + close[pos+2]) / 2)   // Third closes above first's midpoint
+            return true;
+    }
+    
+    // Strong bullish candle
+    if(close[pos] > open[pos] && candleSize > MinCandleSize * 2)
+        return true;
+    
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Check for bearish candlestick patterns                          |
+//+------------------------------------------------------------------+
+bool IsBearishPattern(int pos, const double &open[], const double &high[], 
+                      const double &low[], const double &close[])
+{
+    if(pos >= ArraySize(open) - 2) return false;
+    
+    double candleSize = MathAbs(close[pos] - open[pos]) / _Point;
+    if(candleSize < MinCandleSize) return false;
+    
+    // Bearish Engulfing
+    if(close[pos+1] > open[pos+1] && // Previous candle bullish
+       close[pos] < open[pos] &&     // Current candle bearish
+       open[pos] > close[pos+1] &&   // Current open above previous close
+       close[pos] < open[pos+1])     // Current close below previous open
+        return true;
+    
+    // Shooting Star pattern
+    double body = MathAbs(close[pos] - open[pos]);
+    double upperShadow = high[pos] - MathMax(open[pos], close[pos]);
+    double lowerShadow = MathMin(open[pos], close[pos]) - low[pos];
+    
+    if(upperShadow > body * 2 && lowerShadow < body * 0.5)
+        return true;
+    
+    // Evening Star (3-candle pattern)
+    if(pos < ArraySize(open) - 3)
+    {
+        if(close[pos+2] > open[pos+2] &&                    // First candle bullish
+           MathAbs(close[pos+1] - open[pos+1]) < body * 0.3 && // Middle candle small
+           close[pos] < open[pos] &&                        // Third candle bearish
+           close[pos] < (open[pos+2] + close[pos+2]) / 2)   // Third closes below first's midpoint
+            return true;
+    }
+    
+    // Strong bearish candle
+    if(close[pos] < open[pos] && candleSize > MinCandleSize * 2)
+        return true;
+    
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Get timeframe string                                             |
+//+------------------------------------------------------------------+
+string GetTimeframeString()
+{
+    switch(Period())
+    {
+        case PERIOD_M1:  return "M1";
+        case PERIOD_M5:  return "M5";
+        case PERIOD_M15: return "M15";
+        case PERIOD_M30: return "M30";
+        case PERIOD_H1:  return "H1";
+        case PERIOD_H4:  return "H4";
+        case PERIOD_D1:  return "D1";
+        case PERIOD_W1:  return "W1";
+        case PERIOD_MN1: return "MN1";
+        default: return "Unknown";
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Indicator deinitialization function                             |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    if(volumeMA_handle != INVALID_HANDLE)
+        IndicatorRelease(volumeMA_handle);
+}
+
+//+------------------------------------------------------------------+
