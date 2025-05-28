@@ -1,0 +1,306 @@
+//+------------------------------------------------------------------+
+//|                                           OrderBlockSignals.mq5 |
+//|                                          Copyright 2024, Geraked |
+//|                                       https://github.com/geraked |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2024, Geraked"
+#property link      "https://github.com/geraked"
+#property version   "1.00"
+#property indicator_chart_window
+#property indicator_buffers 6
+#property indicator_plots   4
+
+#property indicator_label1  "Buy Signal"
+#property indicator_type1   DRAW_ARROW
+#property indicator_color1  clrLime
+#property indicator_style1  STYLE_SOLID
+#property indicator_width1  3
+
+#property indicator_label2  "Sell Signal"
+#property indicator_type2   DRAW_ARROW
+#property indicator_color2  clrRed
+#property indicator_style2  STYLE_SOLID
+#property indicator_width2  3
+
+#property indicator_label3  "Buy Zone Upper"
+#property indicator_type3   DRAW_LINE
+#property indicator_color3  clrCyan
+#property indicator_style3  STYLE_DOT
+#property indicator_width3  1
+
+#property indicator_label4  "Buy Zone Lower"
+#property indicator_type4   DRAW_LINE
+#property indicator_color4  clrCyan
+#property indicator_style4  STYLE_DOT
+#property indicator_width4  1
+
+enum ENUM_OB_MODE {
+    OB_MODE_DEFAULT, // Default
+    OB_MODE_FVG // Fair Value Gap (FVG)
+};
+
+enum ENUM_SIGNAL_MODE {
+    SIGNAL_ON_FORMATION, // Signal on Order Block Formation
+    SIGNAL_ON_RETEST     // Signal on Zone Retest
+};
+
+input ENUM_OB_MODE Mode = OB_MODE_DEFAULT;
+input ENUM_SIGNAL_MODE SignalMode = SIGNAL_ON_FORMATION;
+input bool ShowZones = true; // Show Support/Resistance Zones
+input bool AlertsEnabled = true; // Enable Alerts
+input bool NotificationsEnabled = false; // Enable Push Notifications
+
+//--- indicator buffers
+double BuySignalBuffer[];
+double SellSignalBuffer[];
+double BuyZoneUpper[];
+double BuyZoneLower[];
+double SellZoneUpper[];
+double SellZoneLower[];
+
+//--- global variables
+datetime lastBuyAlert = 0;
+datetime lastSellAlert = 0;
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit() {
+    // Set indicator buffers
+    SetIndexBuffer(0, BuySignalBuffer, INDICATOR_DATA);
+    SetIndexBuffer(1, SellSignalBuffer, INDICATOR_DATA);
+    SetIndexBuffer(2, BuyZoneUpper, INDICATOR_DATA);
+    SetIndexBuffer(3, BuyZoneLower, INDICATOR_DATA);
+    SetIndexBuffer(4, SellZoneUpper, INDICATOR_CALCULATIONS);
+    SetIndexBuffer(5, SellZoneLower, INDICATOR_CALCULATIONS);
+
+    // Set arrow codes
+    PlotIndexSetInteger(0, PLOT_ARROW, 233); // Up arrow for buy
+    PlotIndexSetInteger(1, PLOT_ARROW, 234); // Down arrow for sell
+
+    // Set plot visibility
+    if (!ShowZones) {
+        PlotIndexSetInteger(2, PLOT_DRAW_TYPE, DRAW_NONE);
+        PlotIndexSetInteger(3, PLOT_DRAW_TYPE, DRAW_NONE);
+    }
+
+    // Set indicator short name
+    IndicatorSetString(INDICATOR_SHORTNAME, "OrderBlock Signals");
+
+    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[]) {
+
+    int limit = rates_total - prev_calculated;
+
+    if (prev_calculated == 0) {
+        ArrayInitialize(BuySignalBuffer, 0);
+        ArrayInitialize(SellSignalBuffer, 0);
+        ArrayInitialize(BuyZoneUpper, 0);
+        ArrayInitialize(BuyZoneLower, 0);
+        ArrayInitialize(SellZoneUpper, 0);
+        ArrayInitialize(SellZoneLower, 0);
+        limit = limit - 1 - 4;
+    }
+
+    if (rates_total < 4) return(0);
+    if (limit < 0) return(0);
+
+    ArraySetAsSeries(time, true);
+    ArraySetAsSeries(open, true);
+    ArraySetAsSeries(high, true);
+    ArraySetAsSeries(low, true);
+    ArraySetAsSeries(close, true);
+    ArraySetAsSeries(BuySignalBuffer, true);
+    ArraySetAsSeries(SellSignalBuffer, true);
+    ArraySetAsSeries(BuyZoneUpper, true);
+    ArraySetAsSeries(BuyZoneLower, true);
+    ArraySetAsSeries(SellZoneUpper, true);
+    ArraySetAsSeries(SellZoneLower, true);
+
+    for (int i = limit; i >= 0 && !IsStopped(); i--) {
+        
+        bool bullishOrderBlock = false;
+        bool bearishOrderBlock = false;
+        double bullUpper = 0, bullLower = 0;
+        double bearUpper = 0, bearLower = 0;
+
+        if (Mode == OB_MODE_DEFAULT) {
+            // Default order block detection
+            bool bu = close[i + 2] < open[i + 2] && close[i + 1] < open[i + 1] && close[i] > open[i];
+            bool be = close[i + 2] > open[i + 2] && close[i + 1] > open[i + 1] && close[i] < open[i];
+            bu &= close[i + 1] < low[i + 2] && close[i] > high[i + 1];
+            be &= close[i + 1] > high[i + 2] && close[i] < low[i + 1];
+
+            if (bu) {
+                bullishOrderBlock = true;
+                bullUpper = high[i + 1];
+                bullLower = low[i + 1];
+            }
+
+            if (be) {
+                bearishOrderBlock = true;
+                bearUpper = high[i + 1];
+                bearLower = low[i + 1];
+            }
+        }
+        else if (Mode == OB_MODE_FVG) {
+            // Fair Value Gap order block detection
+            bool bu = close[i + 3] < open[i + 3] && close[i + 2] < open[i + 2] && close[i + 1] > open[i + 1];
+            bool be = close[i + 3] > open[i + 3] && close[i + 2] > open[i + 2] && close[i + 1] < open[i + 1];
+            bu &= close[i + 2] < low[i + 3] && close[i + 1] > high[i + 2] && low[i] > high[i + 2];
+            be &= close[i + 2] > high[i + 3] && close[i + 1] < low[i + 2] && high[i] < low[i + 2];
+
+            if (bu) {
+                bullishOrderBlock = true;
+                bullUpper = low[i];
+                bullLower = low[i + 2];
+            }
+
+            if (be) {
+                bearishOrderBlock = true;
+                bearUpper = high[i + 2];
+                bearLower = high[i];
+            }
+        }
+
+        // Generate signals based on mode
+        if (SignalMode == SIGNAL_ON_FORMATION) {
+            // Signal immediately when order block forms
+            if (bullishOrderBlock) {
+                BuySignalBuffer[i] = low[i] - (high[i] - low[i]) * 0.2;
+                BuyZoneUpper[i] = bullUpper;
+                BuyZoneLower[i] = bullLower;
+                
+                // Send alert
+                if (AlertsEnabled && i == 0 && time[i] != lastBuyAlert) {
+                    Alert("OrderBlock BUY Signal at ", Symbol(), " ", EnumToString(Period()));
+                    lastBuyAlert = time[i];
+                }
+                
+                // Send notification
+                if (NotificationsEnabled && i == 0) {
+                    SendNotification("OrderBlock BUY Signal: " + Symbol() + " " + EnumToString(Period()));
+                }
+            } else {
+                BuySignalBuffer[i] = 0;
+                BuyZoneUpper[i] = 0;
+                BuyZoneLower[i] = 0;
+            }
+
+            if (bearishOrderBlock) {
+                SellSignalBuffer[i] = high[i] + (high[i] - low[i]) * 0.2;
+                
+                // Send alert
+                if (AlertsEnabled && i == 0 && time[i] != lastSellAlert) {
+                    Alert("OrderBlock SELL Signal at ", Symbol(), " ", EnumToString(Period()));
+                    lastSellAlert = time[i];
+                }
+                
+                // Send notification
+                if (NotificationsEnabled && i == 0) {
+                    SendNotification("OrderBlock SELL Signal: " + Symbol() + " " + EnumToString(Period()));
+                }
+            } else {
+                SellSignalBuffer[i] = 0;
+            }
+        }
+        else if (SignalMode == SIGNAL_ON_RETEST) {
+            // Signal on retest of order block zone
+            BuySignalBuffer[i] = 0;
+            SellSignalBuffer[i] = 0;
+            BuyZoneUpper[i] = 0;
+            BuyZoneLower[i] = 0;
+            
+            // Check for retest of previous bullish order blocks
+            for (int j = i + 1; j < i + 50 && j < rates_total - 1; j++) {
+                if (BuyZoneUpper[j] > 0 && BuyZoneLower[j] > 0) {
+                    // Check if current candle retested the zone and bounced
+                    if (low[i] <= BuyZoneUpper[j] && low[i] >= BuyZoneLower[j] && close[i] > open[i]) {
+                        BuySignalBuffer[i] = low[i] - (high[i] - low[i]) * 0.2;
+                        BuyZoneUpper[i] = BuyZoneUpper[j];
+                        BuyZoneLower[i] = BuyZoneLower[j];
+                        
+                        if (AlertsEnabled && i == 0 && time[i] != lastBuyAlert) {
+                            Alert("OrderBlock BUY Retest Signal at ", Symbol(), " ", EnumToString(Period()));
+                            lastBuyAlert = time[i];
+                        }
+                        break;
+                    }
+                }
+            }
+            
+            // Check for retest of previous bearish order blocks
+            for (int j = i + 1; j < i + 50 && j < rates_total - 1; j++) {
+                if (SellZoneUpper[j] > 0 && SellZoneLower[j] > 0) {
+                    // Check if current candle retested the zone and rejected
+                    if (high[i] >= SellZoneLower[j] && high[i] <= SellZoneUpper[j] && close[i] < open[i]) {
+                        SellSignalBuffer[i] = high[i] + (high[i] - low[i]) * 0.2;
+                        
+                        if (AlertsEnabled && i == 0 && time[i] != lastSellAlert) {
+                            Alert("OrderBlock SELL Retest Signal at ", Symbol(), " ", EnumToString(Period()));
+                            lastSellAlert = time[i];
+                        }
+                        break;
+                    }
+                }
+            }
+            
+            // Store new order blocks for future retest detection
+            if (bullishOrderBlock) {
+                BuyZoneUpper[i] = bullUpper;
+                BuyZoneLower[i] = bullLower;
+            }
+            if (bearishOrderBlock) {
+                SellZoneUpper[i] = bearUpper;
+                SellZoneLower[i] = bearLower;
+            }
+        }
+    }
+
+    return(rates_total);
+}
+
+//+------------------------------------------------------------------+
+//| Get signal value for external access                            |
+//+------------------------------------------------------------------+
+double GetBuySignal(int shift = 0) {
+    if (shift >= 0 && shift < ArraySize(BuySignalBuffer)) {
+        return BuySignalBuffer[shift];
+    }
+    return 0;
+}
+
+double GetSellSignal(int shift = 0) {
+    if (shift >= 0 && shift < ArraySize(SellSignalBuffer)) {
+        return SellSignalBuffer[shift];
+    }
+    return 0;
+}
+
+//+------------------------------------------------------------------+
+//| Check if there's a new buy signal                               |
+//+------------------------------------------------------------------+
+bool IsNewBuySignal() {
+    return (BuySignalBuffer[0] != 0 && BuySignalBuffer[0] != EMPTY_VALUE);
+}
+
+//+------------------------------------------------------------------+
+//| Check if there's a new sell signal                              |
+//+------------------------------------------------------------------+
+bool IsNewSellSignal() {
+    return (SellSignalBuffer[0] != 0 && SellSignalBuffer[0] != EMPTY_VALUE);
+}
