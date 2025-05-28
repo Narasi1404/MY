@@ -1,0 +1,475 @@
+//+------------------------------------------------------------------+
+//|                                  ScalpingCandlestickPatterns.mq5 |
+//|                                    Professional Scalping Patterns |
+//|                                                                    |
+//+------------------------------------------------------------------+
+#property copyright "Professional Scalping Patterns"
+#property link      ""
+#property version   "1.00"
+#property description "Identifies main candlestick patterns for scalping"
+#property indicator_chart_window
+#property indicator_buffers 8
+#property indicator_plots   4
+
+//--- Indicator parameters
+input int    InpLookback = 10;          // Lookback period for pattern validation
+input bool   InpShowDoji = true;        // Show Doji patterns
+input bool   InpShowHammer = true;      // Show Hammer patterns
+input bool   InpShowEngulfing = true;   // Show Engulfing patterns
+input bool   InpShowPinBar = true;      // Show Pin Bar patterns
+input bool   InpShowAlerts = true;      // Enable alerts
+input bool   InpShowArrows = true;      // Show pattern arrows
+input color  InpBullishColor = clrLime; // Bullish pattern color
+input color  InpBearishColor = clrRed;  // Bearish pattern color
+
+//--- Indicator buffers
+double BullishArrowBuffer[];
+double BearishArrowBuffer[];
+double BullishSignalBuffer[];
+double BearishSignalBuffer[];
+double DojiBuffer[];
+double HammerBuffer[];
+double EngulfingBuffer[];
+double PinBarBuffer[];
+
+//--- Pattern enumeration
+enum ENUM_PATTERN_TYPE
+{
+   PATTERN_NONE = 0,
+   PATTERN_DOJI = 1,
+   PATTERN_HAMMER = 2,
+   PATTERN_HANGING_MAN = 3,
+   PATTERN_BULLISH_ENGULFING = 4,
+   PATTERN_BEARISH_ENGULFING = 5,
+   PATTERN_BULLISH_PIN_BAR = 6,
+   PATTERN_BEARISH_PIN_BAR = 7,
+   PATTERN_MORNING_STAR = 8,
+   PATTERN_EVENING_STAR = 9,
+   PATTERN_PIERCING_LINE = 10,
+   PATTERN_DARK_CLOUD_COVER = 11
+};
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   //--- Set indicator buffers
+   SetIndexBuffer(0, BullishArrowBuffer, INDICATOR_DATA);
+   SetIndexBuffer(1, BearishArrowBuffer, INDICATOR_DATA);
+   SetIndexBuffer(2, BullishSignalBuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(3, BearishSignalBuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(4, DojiBuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(5, HammerBuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(6, EngulfingBuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(7, PinBarBuffer, INDICATOR_CALCULATIONS);
+   
+   //--- Set plot properties
+   PlotIndexSetInteger(0, PLOT_DRAW_TYPE, DRAW_ARROW);
+   PlotIndexSetInteger(0, PLOT_ARROW, 233); // Up arrow
+   PlotIndexSetString(0, PLOT_LABEL, "Bullish Pattern");
+   PlotIndexSetInteger(0, PLOT_LINE_COLOR, InpBullishColor);
+   PlotIndexSetInteger(0, PLOT_LINE_WIDTH, 2);
+   
+   PlotIndexSetInteger(1, PLOT_DRAW_TYPE, DRAW_ARROW);
+   PlotIndexSetInteger(1, PLOT_ARROW, 234); // Down arrow
+   PlotIndexSetString(1, PLOT_LABEL, "Bearish Pattern");
+   PlotIndexSetInteger(1, PLOT_LINE_COLOR, InpBearishColor);
+   PlotIndexSetInteger(1, PLOT_LINE_WIDTH, 2);
+   
+   //--- Initialize buffers
+   ArraySetAsSeries(BullishArrowBuffer, true);
+   ArraySetAsSeries(BearishArrowBuffer, true);
+   ArraySetAsSeries(BullishSignalBuffer, true);
+   ArraySetAsSeries(BearishSignalBuffer, true);
+   ArraySetAsSeries(DojiBuffer, true);
+   ArraySetAsSeries(HammerBuffer, true);
+   ArraySetAsSeries(EngulfingBuffer, true);
+   ArraySetAsSeries(PinBarBuffer, true);
+   
+   //--- Set indicator name
+   IndicatorSetString(INDICATOR_SHORTNAME, "Scalping Candlestick Patterns");
+   
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+   //--- Set arrays as series
+   ArraySetAsSeries(open, true);
+   ArraySetAsSeries(high, true);
+   ArraySetAsSeries(low, true);
+   ArraySetAsSeries(close, true);
+   ArraySetAsSeries(time, true);
+   
+   //--- Calculate patterns
+   int start = MathMax(prev_calculated - 1, 3);
+   
+   for(int i = start; i < rates_total - 3; i++)
+   {
+      int shift = rates_total - 1 - i;
+      
+      //--- Initialize buffers
+      BullishArrowBuffer[shift] = EMPTY_VALUE;
+      BearishArrowBuffer[shift] = EMPTY_VALUE;
+      BullishSignalBuffer[shift] = 0;
+      BearishSignalBuffer[shift] = 0;
+      DojiBuffer[shift] = 0;
+      HammerBuffer[shift] = 0;
+      EngulfingBuffer[shift] = 0;
+      PinBarBuffer[shift] = 0;
+      
+      //--- Check for patterns
+      ENUM_PATTERN_TYPE pattern = CheckCandlestickPattern(shift, open, high, low, close);
+      
+      if(pattern != PATTERN_NONE)
+      {
+         string patternName = GetPatternName(pattern);
+         bool isBullish = IsBullishPattern(pattern);
+         
+         if(isBullish)
+         {
+            if(InpShowArrows)
+               BullishArrowBuffer[shift] = low[shift] - (high[shift] - low[shift]) * 0.1;
+            BullishSignalBuffer[shift] = 1;
+            
+            //--- Set pattern-specific buffer
+            SetPatternBuffer(pattern, shift, 1);
+         }
+         else
+         {
+            if(InpShowArrows)
+               BearishArrowBuffer[shift] = high[shift] + (high[shift] - low[shift]) * 0.1;
+            BearishSignalBuffer[shift] = 1;
+            
+            //--- Set pattern-specific buffer
+            SetPatternBuffer(pattern, shift, 1);
+         }
+         
+         //--- Send alert
+         if(InpShowAlerts && shift == 0)
+         {
+            string alertMessage = StringFormat("%s pattern detected on %s %s", 
+                                 patternName, _Symbol, EnumToString(_Period));
+            Alert(alertMessage);
+         }
+      }
+   }
+   
+   return(rates_total);
+}
+
+//+------------------------------------------------------------------+
+//| Check for candlestick patterns                                  |
+//+------------------------------------------------------------------+
+ENUM_PATTERN_TYPE CheckCandlestickPattern(int shift, const double &open[], 
+                                         const double &high[], const double &low[], 
+                                         const double &close[])
+{
+   //--- Get candle data
+   double o0 = open[shift], h0 = high[shift], l0 = low[shift], c0 = close[shift];
+   double o1 = open[shift+1], h1 = high[shift+1], l1 = low[shift+1], c1 = close[shift+1];
+   double o2 = open[shift+2], h2 = high[shift+2], l2 = low[shift+2], c2 = close[shift+2];
+   
+   double body0 = MathAbs(c0 - o0);
+   double body1 = MathAbs(c1 - o1);
+   double range0 = h0 - l0;
+   double range1 = h1 - l1;
+   
+   //--- Check for Doji patterns
+   if(InpShowDoji && IsDoji(o0, h0, l0, c0))
+   {
+      return PATTERN_DOJI;
+   }
+   
+   //--- Check for Hammer/Hanging Man
+   if(InpShowHammer)
+   {
+      if(IsHammer(o0, h0, l0, c0))
+      {
+         // Determine if it's bullish hammer or bearish hanging man based on trend
+         if(IsBullishTrend(shift, close))
+            return PATTERN_HANGING_MAN;
+         else
+            return PATTERN_HAMMER;
+      }
+   }
+   
+   //--- Check for Engulfing patterns
+   if(InpShowEngulfing)
+   {
+      if(IsBullishEngulfing(o0, h0, l0, c0, o1, h1, l1, c1))
+         return PATTERN_BULLISH_ENGULFING;
+      
+      if(IsBearishEngulfing(o0, h0, l0, c0, o1, h1, l1, c1))
+         return PATTERN_BEARISH_ENGULFING;
+   }
+   
+   //--- Check for Pin Bar patterns
+   if(InpShowPinBar)
+   {
+      if(IsBullishPinBar(o0, h0, l0, c0))
+         return PATTERN_BULLISH_PIN_BAR;
+      
+      if(IsBearishPinBar(o0, h0, l0, c0))
+         return PATTERN_BEARISH_PIN_BAR;
+   }
+   
+   //--- Check for Star patterns (3-candle patterns)
+   if(shift >= 2)
+   {
+      if(IsMorningStar(o0, h0, l0, c0, o1, h1, l1, c1, o2, h2, l2, c2))
+         return PATTERN_MORNING_STAR;
+      
+      if(IsEveningStar(o0, h0, l0, c0, o1, h1, l1, c1, o2, h2, l2, c2))
+         return PATTERN_EVENING_STAR;
+   }
+   
+   //--- Check for Piercing Line and Dark Cloud Cover
+   if(IsPiercingLine(o0, h0, l0, c0, o1, h1, l1, c1))
+      return PATTERN_PIERCING_LINE;
+   
+   if(IsDarkCloudCover(o0, h0, l0, c0, o1, h1, l1, c1))
+      return PATTERN_DARK_CLOUD_COVER;
+   
+   return PATTERN_NONE;
+}
+
+//+------------------------------------------------------------------+
+//| Check if candle is Doji                                         |
+//+------------------------------------------------------------------+
+bool IsDoji(double open, double high, double low, double close)
+{
+   double body = MathAbs(close - open);
+   double range = high - low;
+   
+   if(range == 0) return false;
+   
+   // Doji: body is less than 5% of the range
+   return (body / range < 0.05);
+}
+
+//+------------------------------------------------------------------+
+//| Check if candle is Hammer                                       |
+//+------------------------------------------------------------------+
+bool IsHammer(double open, double high, double low, double close)
+{
+   double body = MathAbs(close - open);
+   double range = high - low;
+   double lowerShadow = MathMin(open, close) - low;
+   double upperShadow = high - MathMax(open, close);
+   
+   if(range == 0 || body == 0) return false;
+   
+   // Hammer: long lower shadow (at least 2x body), small upper shadow
+   return (lowerShadow >= 2 * body && upperShadow <= body * 0.5 && body / range >= 0.1);
+}
+
+//+------------------------------------------------------------------+
+//| Check for Bullish Engulfing                                    |
+//+------------------------------------------------------------------+
+bool IsBullishEngulfing(double o0, double h0, double l0, double c0,
+                       double o1, double h1, double l1, double c1)
+{
+   // Current candle is bullish, previous is bearish
+   // Current candle engulfs previous candle
+   return (c0 > o0 && c1 < o1 && o0 < c1 && c0 > o1);
+}
+
+//+------------------------------------------------------------------+
+//| Check for Bearish Engulfing                                    |
+//+------------------------------------------------------------------+
+bool IsBearishEngulfing(double o0, double h0, double l0, double c0,
+                       double o1, double h1, double l1, double c1)
+{
+   // Current candle is bearish, previous is bullish
+   // Current candle engulfs previous candle
+   return (c0 < o0 && c1 > o1 && o0 > c1 && c0 < o1);
+}
+
+//+------------------------------------------------------------------+
+//| Check for Bullish Pin Bar                                      |
+//+------------------------------------------------------------------+
+bool IsBullishPinBar(double open, double high, double low, double close)
+{
+   double body = MathAbs(close - open);
+   double range = high - low;
+   double lowerShadow = MathMin(open, close) - low;
+   double upperShadow = high - MathMax(open, close);
+   
+   if(range == 0) return false;
+   
+   // Bullish Pin Bar: long lower tail, small body, close near high
+   return (lowerShadow >= range * 0.6 && body <= range * 0.3 && 
+           upperShadow <= range * 0.2 && close >= (high + low) / 2);
+}
+
+//+------------------------------------------------------------------+
+//| Check for Bearish Pin Bar                                      |
+//+------------------------------------------------------------------+
+bool IsBearishPinBar(double open, double high, double low, double close)
+{
+   double body = MathAbs(close - open);
+   double range = high - low;
+   double lowerShadow = MathMin(open, close) - low;
+   double upperShadow = high - MathMax(open, close);
+   
+   if(range == 0) return false;
+   
+   // Bearish Pin Bar: long upper tail, small body, close near low
+   return (upperShadow >= range * 0.6 && body <= range * 0.3 && 
+           lowerShadow <= range * 0.2 && close <= (high + low) / 2);
+}
+
+//+------------------------------------------------------------------+
+//| Check for Morning Star pattern                                 |
+//+------------------------------------------------------------------+
+bool IsMorningStar(double o0, double h0, double l0, double c0,
+                  double o1, double h1, double l1, double c1,
+                  double o2, double h2, double l2, double c2)
+{
+   // First candle: bearish
+   // Second candle: small body (star)
+   // Third candle: bullish, closes above middle of first candle
+   double body0 = MathAbs(c0 - o0);
+   double body1 = MathAbs(c1 - o1);
+   double body2 = MathAbs(c2 - o2);
+   
+   return (c2 < o2 && // First candle bearish
+           body1 < body2 * 0.3 && // Second candle small
+           c0 > o0 && // Third candle bullish
+           c0 > (o2 + c2) / 2); // Third closes above middle of first
+}
+
+//+------------------------------------------------------------------+
+//| Check for Evening Star pattern                                 |
+//+------------------------------------------------------------------+
+bool IsEveningStar(double o0, double h0, double l0, double c0,
+                  double o1, double h1, double l1, double c1,
+                  double o2, double h2, double l2, double c2)
+{
+   // First candle: bullish
+   // Second candle: small body (star)
+   // Third candle: bearish, closes below middle of first candle
+   double body0 = MathAbs(c0 - o0);
+   double body1 = MathAbs(c1 - o1);
+   double body2 = MathAbs(c2 - o2);
+   
+   return (c2 > o2 && // First candle bullish
+           body1 < body2 * 0.3 && // Second candle small
+           c0 < o0 && // Third candle bearish
+           c0 < (o2 + c2) / 2); // Third closes below middle of first
+}
+
+//+------------------------------------------------------------------+
+//| Check for Piercing Line                                        |
+//+------------------------------------------------------------------+
+bool IsPiercingLine(double o0, double h0, double l0, double c0,
+                   double o1, double h1, double l1, double c1)
+{
+   // Previous candle bearish, current bullish
+   // Current opens below previous low, closes above middle of previous
+   return (c1 < o1 && c0 > o0 && o0 < l1 && c0 > (o1 + c1) / 2);
+}
+
+//+------------------------------------------------------------------+
+//| Check for Dark Cloud Cover                                     |
+//+------------------------------------------------------------------+
+bool IsDarkCloudCover(double o0, double h0, double l0, double c0,
+                     double o1, double h1, double l1, double c1)
+{
+   // Previous candle bullish, current bearish
+   // Current opens above previous high, closes below middle of previous
+   return (c1 > o1 && c0 < o0 && o0 > h1 && c0 < (o1 + c1) / 2);
+}
+
+//+------------------------------------------------------------------+
+//| Check if trend is bullish                                      |
+//+------------------------------------------------------------------+
+bool IsBullishTrend(int shift, const double &close[])
+{
+   double sum = 0;
+   for(int i = shift + 1; i <= shift + InpLookback; i++)
+   {
+      sum += close[i];
+   }
+   double average = sum / InpLookback;
+   return (close[shift] > average);
+}
+
+//+------------------------------------------------------------------+
+//| Check if pattern is bullish                                    |
+//+------------------------------------------------------------------+
+bool IsBullishPattern(ENUM_PATTERN_TYPE pattern)
+{
+   switch(pattern)
+   {
+      case PATTERN_HAMMER:
+      case PATTERN_BULLISH_ENGULFING:
+      case PATTERN_BULLISH_PIN_BAR:
+      case PATTERN_MORNING_STAR:
+      case PATTERN_PIERCING_LINE:
+         return true;
+      default:
+         return false;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Get pattern name                                               |
+//+------------------------------------------------------------------+
+string GetPatternName(ENUM_PATTERN_TYPE pattern)
+{
+   switch(pattern)
+   {
+      case PATTERN_DOJI: return "Doji";
+      case PATTERN_HAMMER: return "Hammer";
+      case PATTERN_HANGING_MAN: return "Hanging Man";
+      case PATTERN_BULLISH_ENGULFING: return "Bullish Engulfing";
+      case PATTERN_BEARISH_ENGULFING: return "Bearish Engulfing";
+      case PATTERN_BULLISH_PIN_BAR: return "Bullish Pin Bar";
+      case PATTERN_BEARISH_PIN_BAR: return "Bearish Pin Bar";
+      case PATTERN_MORNING_STAR: return "Morning Star";
+      case PATTERN_EVENING_STAR: return "Evening Star";
+      case PATTERN_PIERCING_LINE: return "Piercing Line";
+      case PATTERN_DARK_CLOUD_COVER: return "Dark Cloud Cover";
+      default: return "Unknown";
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Set pattern-specific buffer                                    |
+//+------------------------------------------------------------------+
+void SetPatternBuffer(ENUM_PATTERN_TYPE pattern, int shift, double value)
+{
+   switch(pattern)
+   {
+      case PATTERN_DOJI:
+         DojiBuffer[shift] = value;
+         break;
+      case PATTERN_HAMMER:
+      case PATTERN_HANGING_MAN:
+         HammerBuffer[shift] = value;
+         break;
+      case PATTERN_BULLISH_ENGULFING:
+      case PATTERN_BEARISH_ENGULFING:
+         EngulfingBuffer[shift] = value;
+         break;
+      case PATTERN_BULLISH_PIN_BAR:
+      case PATTERN_BEARISH_PIN_BAR:
+         PinBarBuffer[shift] = value;
+         break;
+   }
+}
