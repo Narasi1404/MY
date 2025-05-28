@@ -1,0 +1,242 @@
+//+------------------------------------------------------------------+
+//|                                    Professional5MTrader.mq5      |
+//|                        Copyright 2024, Professional Trader      |
+//|                                       https://www.example.com    |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2024, Professional Trader"
+#property link      "https://www.example.com"
+#property version   "1.00"
+#property indicator_chart_window
+#property indicator_buffers 8
+#property indicator_plots   4
+
+// Input parameters
+input int MA_Fast_Period = 20;           // Fast Moving Average Period
+input int MA_Slow_Period = 50;           // Slow Moving Average Period
+input int RSI_Period = 14;               // RSI Period
+input double RSI_Overbought = 70.0;     // RSI Overbought Level
+input double RSI_Oversold = 30.0;       // RSI Oversold Level
+input bool Show_Signals = true;         // Show Buy/Sell Signals
+input bool Show_Support_Resistance = true; // Show Support/Resistance
+input color Fast_MA_Color = clrBlue;     // Fast MA Color
+input color Slow_MA_Color = clrRed;      // Slow MA Color
+
+// Indicator buffers
+double FastMABuffer[];
+double SlowMABuffer[];
+double BuySignalBuffer[];
+double SellSignalBuffer[];
+double SupportBuffer[];
+double ResistanceBuffer[];
+double RSIBuffer[];
+double TempBuffer[];
+
+// Global variables
+int FastMAHandle;
+int SlowMAHandle;
+int RSIHandle;
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    // Set indicator buffers
+    SetIndexBuffer(0, FastMABuffer, INDICATOR_DATA);
+    SetIndexBuffer(1, SlowMABuffer, INDICATOR_DATA);
+    SetIndexBuffer(2, BuySignalBuffer, INDICATOR_DATA);
+    SetIndexBuffer(3, SellSignalBuffer, INDICATOR_DATA);
+    SetIndexBuffer(4, SupportBuffer, INDICATOR_CALCULATIONS);
+    SetIndexBuffer(5, ResistanceBuffer, INDICATOR_CALCULATIONS);
+    SetIndexBuffer(6, RSIBuffer, INDICATOR_CALCULATIONS);
+    SetIndexBuffer(7, TempBuffer, INDICATOR_CALCULATIONS);
+    
+    // Set plot properties
+    PlotIndexSetInteger(0, PLOT_DRAW_TYPE, DRAW_LINE);
+    PlotIndexSetInteger(0, PLOT_LINE_COLOR, Fast_MA_Color);
+    PlotIndexSetInteger(0, PLOT_LINE_WIDTH, 2);
+    PlotIndexSetString(0, PLOT_LABEL, "Fast MA(" + IntegerToString(MA_Fast_Period) + ")");
+    
+    PlotIndexSetInteger(1, PLOT_DRAW_TYPE, DRAW_LINE);
+    PlotIndexSetInteger(1, PLOT_LINE_COLOR, Slow_MA_Color);
+    PlotIndexSetInteger(1, PLOT_LINE_WIDTH, 2);
+    PlotIndexSetString(1, PLOT_LABEL, "Slow MA(" + IntegerToString(MA_Slow_Period) + ")");
+    
+    if(Show_Signals)
+    {
+        PlotIndexSetInteger(2, PLOT_DRAW_TYPE, DRAW_ARROW);
+        PlotIndexSetInteger(2, PLOT_ARROW, 233); // Up arrow
+        PlotIndexSetInteger(2, PLOT_LINE_COLOR, clrLime);
+        PlotIndexSetInteger(2, PLOT_LINE_WIDTH, 3);
+        PlotIndexSetString(2, PLOT_LABEL, "Buy Signal");
+        
+        PlotIndexSetInteger(3, PLOT_DRAW_TYPE, DRAW_ARROW);
+        PlotIndexSetInteger(3, PLOT_ARROW, 234); // Down arrow
+        PlotIndexSetInteger(3, PLOT_LINE_COLOR, clrRed);
+        PlotIndexSetInteger(3, PLOT_LINE_WIDTH, 3);
+        PlotIndexSetString(3, PLOT_LABEL, "Sell Signal");
+    }
+    else
+    {
+        PlotIndexSetInteger(2, PLOT_DRAW_TYPE, DRAW_NONE);
+        PlotIndexSetInteger(3, PLOT_DRAW_TYPE, DRAW_NONE);
+    }
+    
+    // Create handles for built-in indicators
+    FastMAHandle = iMA(_Symbol, _Period, MA_Fast_Period, 0, MODE_SMA, PRICE_CLOSE);
+    SlowMAHandle = iMA(_Symbol, _Period, MA_Slow_Period, 0, MODE_SMA, PRICE_CLOSE);
+    RSIHandle = iRSI(_Symbol, _Period, RSI_Period, PRICE_CLOSE);
+    
+    if(FastMAHandle == INVALID_HANDLE || SlowMAHandle == INVALID_HANDLE || RSIHandle == INVALID_HANDLE)
+    {
+        Print("Error creating indicator handles");
+        return INIT_FAILED;
+    }
+    
+    // Set indicator name
+    IndicatorSetString(INDICATOR_SHORTNAME, "Professional 5M Trader");
+    
+    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+    if(rates_total < MA_Slow_Period + RSI_Period)
+        return 0;
+    
+    int start = prev_calculated;
+    if(start == 0)
+        start = MA_Slow_Period + RSI_Period;
+    
+    // Get indicator data
+    if(CopyBuffer(FastMAHandle, 0, 0, rates_total, FastMABuffer) <= 0)
+        return 0;
+    if(CopyBuffer(SlowMAHandle, 0, 0, rates_total, SlowMABuffer) <= 0)
+        return 0;
+    if(CopyBuffer(RSIHandle, 0, 0, rates_total, RSIBuffer) <= 0)
+        return 0;
+    
+    // Calculate signals and support/resistance
+    for(int i = start; i < rates_total; i++)
+    {
+        // Initialize signal buffers
+        BuySignalBuffer[i] = EMPTY_VALUE;
+        SellSignalBuffer[i] = EMPTY_VALUE;
+        
+        if(i < MA_Slow_Period + RSI_Period + 1)
+            continue;
+        
+        // Calculate support and resistance levels
+        if(Show_Support_Resistance)
+        {
+            CalculateSupportResistance(i, high, low, close);
+        }
+        
+        // Generate trading signals
+        if(Show_Signals && i > MA_Slow_Period + RSI_Period + 5)
+        {
+            GenerateTradingSignals(i, high, low, close);
+        }
+    }
+    
+    return rates_total;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate Support and Resistance Levels                         |
+//+------------------------------------------------------------------+
+void CalculateSupportResistance(int index, const double &high[], const double &low[], const double &close[])
+{
+    int lookback = 20;
+    if(index < lookback)
+        return;
+    
+    double highest = high[index];
+    double lowest = low[index];
+    
+    // Find local highs and lows
+    for(int i = index - lookback; i <= index; i++)
+    {
+        if(high[i] > highest)
+            highest = high[i];
+        if(low[i] < lowest)
+            lowest = low[i];
+    }
+    
+    SupportBuffer[index] = lowest;
+    ResistanceBuffer[index] = highest;
+}
+
+//+------------------------------------------------------------------+
+//| Generate Trading Signals                                        |
+//+------------------------------------------------------------------+
+void GenerateTradingSignals(int index, const double &high[], const double &low[], const double &close[])
+{
+    // MA Crossover + RSI confirmation
+    bool MA_Bullish = FastMABuffer[index] > SlowMABuffer[index] && 
+                      FastMABuffer[index-1] <= SlowMABuffer[index-1];
+    bool MA_Bearish = FastMABuffer[index] < SlowMABuffer[index] && 
+                      FastMABuffer[index-1] >= SlowMABuffer[index-1];
+    
+    bool RSI_Bullish = RSIBuffer[index] > RSI_Oversold && RSIBuffer[index] < 60;
+    bool RSI_Bearish = RSIBuffer[index] < RSI_Overbought && RSIBuffer[index] > 40;
+    
+    // Price action confirmation
+    bool Bullish_Candle = close[index] > close[index-1];
+    bool Bearish_Candle = close[index] < close[index-1];
+    
+    // Volume confirmation (using tick volume as proxy)
+    // bool Volume_Confirmation = tick_volume[index] > tick_volume[index-1];
+    
+    // Generate buy signal
+    if(MA_Bullish && RSI_Bullish && Bullish_Candle)
+    {
+        BuySignalBuffer[index] = low[index] - (high[index] - low[index]) * 0.2;
+    }
+    
+    // Generate sell signal
+    if(MA_Bearish && RSI_Bearish && Bearish_Candle)
+    {
+        SellSignalBuffer[index] = high[index] + (high[index] - low[index]) * 0.2;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator deinitialization function                      |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    // Release indicator handles
+    if(FastMAHandle != INVALID_HANDLE)
+        IndicatorRelease(FastMAHandle);
+    if(SlowMAHandle != INVALID_HANDLE)
+        IndicatorRelease(SlowMAHandle);
+    if(RSIHandle != INVALID_HANDLE)
+        IndicatorRelease(RSIHandle);
+}
+
+//+------------------------------------------------------------------+
+//| Custom function to display information                          |
+//+------------------------------------------------------------------+
+void DisplayInfo(int index, const double &close[])
+{
+    string info = "";
+    info += "Fast MA: " + DoubleToString(FastMABuffer[index], _Digits) + "\n";
+    info += "Slow MA: " + DoubleToString(SlowMABuffer[index], _Digits) + "\n";
+    info += "RSI: " + DoubleToString(RSIBuffer[index], 2) + "\n";
+    info += "Price: " + DoubleToString(close[index], _Digits);
+    
+    Comment(info);
+}
