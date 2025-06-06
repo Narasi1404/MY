@@ -52,6 +52,7 @@ input int    Lookback_Bars = 100;      // Bars for S/R calculation
 input bool   Show_Alerts = true;       // Show Alert Messages
 input bool   Show_SR_Lines = true;      // Show Support/Resistance Lines
 input int    Signal_Strength = 3;      // Min signals required (1-5)
+input bool   Show_Info_Panel = true;     // Show Signal Info Panel
 
 //--- Indicator buffers
 double BuySignalBuffer[];
@@ -65,7 +66,9 @@ double MACDBuffer[];
 
 //--- Global variables
 int FastMAHandle, SlowMAHandle, RSIHandle, MACDHandle, ATRHandle, StochHandle;
-datetime LastAlertTime = 0;
+datetime LastBuyAlertTime = 0;
+datetime LastSellAlertTime = 0;
+bool FirstRun = true;
 
 //+------------------------------------------------------------------+
 //| Custom indicator initialization function                         |
@@ -217,22 +220,41 @@ int OnCalculate(const int rates_total,
       if(BuySignals >= Signal_Strength)
       {
          BuySignalBuffer[pos] = low[pos] - ATRBuffer[pos] * 0.5;
-         if(Show_Alerts && i == 0 && time[pos] != LastAlertTime)
+         
+         // Alert for new BUY signal
+         if(Show_Alerts && pos == 0 && !FirstRun && time[pos] != LastBuyAlertTime)
          {
-            Alert("BUY Signal on ", _Symbol, " at ", TimeToString(time[pos]));
-            LastAlertTime = time[pos];
+            string alertMsg = StringFormat("🟢 BUY SIGNAL: %s | Strength: %d/%d | Price: %.5f | Time: %s", 
+                                         _Symbol, BuySignals, 5, close[pos], TimeToString(time[pos], TIME_MINUTES));
+            Alert(alertMsg);
+            Print(alertMsg);
+            LastBuyAlertTime = time[pos];
          }
       }
       
       if(SellSignals >= Signal_Strength)
       {
          SellSignalBuffer[pos] = high[pos] + ATRBuffer[pos] * 0.5;
-         if(Show_Alerts && i == 0 && time[pos] != LastAlertTime)
+         
+         // Alert for new SELL signal
+         if(Show_Alerts && pos == 0 && !FirstRun && time[pos] != LastSellAlertTime)
          {
-            Alert("SELL Signal on ", _Symbol, " at ", TimeToString(time[pos]));
-            LastAlertTime = time[pos];
+            string alertMsg = StringFormat("🔴 SELL SIGNAL: %s | Strength: %d/%d | Price: %.5f | Time: %s", 
+                                         _Symbol, SellSignals, 5, close[pos], TimeToString(time[pos], TIME_MINUTES));
+            Alert(alertMsg);
+            Print(alertMsg);
+            LastSellAlertTime = time[pos];
          }
       }
+   }
+   
+   //--- Mark first run as complete
+   FirstRun = false;
+   
+   //--- Update info panel
+   if(Show_Info_Panel)
+   {
+      UpdateInfoPanel(rates_total, close, time);
    }
    
    return(rates_total);
@@ -310,10 +332,78 @@ bool IsBearishEngulfing(int shift, int rates_total, const double &high[], const 
 }
 
 //+------------------------------------------------------------------+
+//| Update Information Panel                                         |
+//+------------------------------------------------------------------+
+void UpdateInfoPanel(int rates_total, const double &close[], const datetime &time[])
+{
+   string panel_name = "SignalInfoPanel";
+   
+   //--- Create or update panel
+   if(ObjectFind(0, panel_name) < 0)
+   {
+      ObjectCreate(0, panel_name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, panel_name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, panel_name, OBJPROP_XDISTANCE, 10);
+      ObjectSetInteger(0, panel_name, OBJPROP_YDISTANCE, 50);
+      ObjectSetInteger(0, panel_name, OBJPROP_XSIZE, 250);
+      ObjectSetInteger(0, panel_name, OBJPROP_YSIZE, 150);
+      ObjectSetInteger(0, panel_name, OBJPROP_BGCOLOR, clrDarkSlateGray);
+      ObjectSetInteger(0, panel_name, OBJPROP_BORDER_COLOR, clrWhite);
+      ObjectSetInteger(0, panel_name, OBJPROP_COLOR, clrWhite);
+   }
+   
+   //--- Create text labels
+   string labels[] = {"PanelTitle", "CurrentPrice", "LastSignal", "SignalStrength", "NextUpdate"};
+   string texts[] = {
+      "📊 ADVANCED MULTI-SIGNAL",
+      StringFormat("💰 Price: %.5f", close[0]),
+      "⏳ Scanning for signals...",
+      StringFormat("🎯 Required Strength: %d/5", Signal_Strength),
+      StringFormat("🕐 Last Update: %s", TimeToString(TimeCurrent(), TIME_MINUTES))
+   };
+   
+   for(int i = 0; i < ArraySize(labels); i++)
+   {
+      if(ObjectFind(0, labels[i]) < 0)
+      {
+         ObjectCreate(0, labels[i], OBJ_LABEL, 0, 0, 0);
+         ObjectSetInteger(0, labels[i], OBJPROP_CORNER, CORNER_LEFT_UPPER);
+         ObjectSetInteger(0, labels[i], OBJPROP_XDISTANCE, 20);
+         ObjectSetInteger(0, labels[i], OBJPROP_YDISTANCE, 60 + i * 18);
+         ObjectSetInteger(0, labels[i], OBJPROP_COLOR, i == 0 ? clrYellow : clrWhite);
+         ObjectSetInteger(0, labels[i], OBJPROP_FONTSIZE, i == 0 ? 9 : 8);
+      }
+      ObjectSetString(0, labels[i], OBJPROP_TEXT, texts[i]);
+   }
+   
+   //--- Check for recent signals
+   if(BuySignalBuffer[0] != EMPTY_VALUE)
+   {
+      ObjectSetString(0, "LastSignal", OBJPROP_TEXT, "🟢 ACTIVE BUY SIGNAL!");
+      ObjectSetInteger(0, "LastSignal", OBJPROP_COLOR, clrLime);
+   }
+   else if(SellSignalBuffer[0] != EMPTY_VALUE)
+   {
+      ObjectSetString(0, "LastSignal", OBJPROP_TEXT, "🔴 ACTIVE SELL SIGNAL!");
+      ObjectSetInteger(0, "LastSignal", OBJPROP_COLOR, clrRed);
+   }
+   
+   ChartRedraw(0);
+}
+
+//+------------------------------------------------------------------+
 //| Custom indicator deinitialization function                      |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+   //--- Remove info panel objects
+   ObjectDelete(0, "SignalInfoPanel");
+   ObjectDelete(0, "PanelTitle");
+   ObjectDelete(0, "CurrentPrice");
+   ObjectDelete(0, "LastSignal");
+   ObjectDelete(0, "SignalStrength");
+   ObjectDelete(0, "NextUpdate");
+   
    //--- Release indicator handles
    if(FastMAHandle != INVALID_HANDLE) IndicatorRelease(FastMAHandle);
    if(SlowMAHandle != INVALID_HANDLE) IndicatorRelease(SlowMAHandle);
