@@ -1,0 +1,324 @@
+//+------------------------------------------------------------------+
+//|                                    Advanced Multi-Signal Forex   |
+//|                               Copyright 2025, Advanced Trading   |
+//|                                                                  |
+//+------------------------------------------------------------------+
+#property copyright "Advanced Trading 2025"
+#property link      ""
+#property version   "1.00"
+#property indicator_chart_window
+#property indicator_buffers 8
+#property indicator_plots   4
+
+//--- Plot arrows and lines
+#property indicator_label1  "Buy Signal"
+#property indicator_type1   DRAW_ARROW
+#property indicator_color1  clrLime
+#property indicator_style1  STYLE_SOLID
+#property indicator_width1  3
+
+#property indicator_label2  "Sell Signal"
+#property indicator_type2   DRAW_ARROW
+#property indicator_color2  clrRed
+#property indicator_style2  STYLE_SOLID
+#property indicator_width2  3
+
+#property indicator_label3  "Support Level"
+#property indicator_type3   DRAW_LINE
+#property indicator_color3  clrBlue
+#property indicator_style3  STYLE_DASH
+#property indicator_width3  2
+
+#property indicator_label4  "Resistance Level"
+#property indicator_type4   DRAW_LINE
+#property indicator_color4  clrOrange
+#property indicator_style4  STYLE_DASH
+#property indicator_width4  2
+
+//--- Input parameters
+input int    FastMA_Period = 9;        // Fast MA Period
+input int    SlowMA_Period = 21;       // Slow MA Period
+input int    RSI_Period = 14;          // RSI Period
+input int    MACD_Fast = 12;           // MACD Fast EMA
+input int    MACD_Slow = 26;           // MACD Slow EMA
+input int    MACD_Signal = 9;          // MACD Signal Period
+input int    ATR_Period = 14;          // ATR Period for volatility
+input int    Stoch_K = 5;              // Stochastic %K
+input int    Stoch_D = 3;              // Stochastic %D
+input int    Stoch_Slowing = 3;        // Stochastic Slowing
+input double RSI_Oversold = 30;        // RSI Oversold Level
+input double RSI_Overbought = 70;      // RSI Overbought Level
+input int    Lookback_Bars = 100;      // Bars for S/R calculation
+input bool   Show_Alerts = true;       // Show Alert Messages
+input bool   Show_SR_Lines = true;      // Show Support/Resistance Lines
+input int    Signal_Strength = 3;      // Min signals required (1-5)
+
+//--- Indicator buffers
+double BuySignalBuffer[];
+double SellSignalBuffer[];
+double SupportBuffer[];
+double ResistanceBuffer[];
+double FastMABuffer[];
+double SlowMABuffer[];
+double RSIBuffer[];
+double MACDBuffer[];
+
+//--- Global variables
+int FastMAHandle, SlowMAHandle, RSIHandle, MACDHandle, ATRHandle, StochHandle;
+datetime LastAlertTime = 0;
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   //--- Indicator buffers mapping
+   SetIndexBuffer(0, BuySignalBuffer, INDICATOR_DATA);
+   SetIndexBuffer(1, SellSignalBuffer, INDICATOR_DATA);
+   SetIndexBuffer(2, SupportBuffer, INDICATOR_DATA);
+   SetIndexBuffer(3, ResistanceBuffer, INDICATOR_DATA);
+   SetIndexBuffer(4, FastMABuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(5, SlowMABuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(6, RSIBuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(7, MACDBuffer, INDICATOR_CALCULATIONS);
+   
+   //--- Set arrow codes
+   PlotIndexSetInteger(0, PLOT_ARROW, 233);  // Up arrow for buy
+   PlotIndexSetInteger(1, PLOT_ARROW, 234);  // Down arrow for sell
+   
+   //--- Initialize arrays
+   ArraySetAsSeries(BuySignalBuffer, true);
+   ArraySetAsSeries(SellSignalBuffer, true);
+   ArraySetAsSeries(SupportBuffer, true);
+   ArraySetAsSeries(ResistanceBuffer, true);
+   
+   //--- Create handles for indicators
+   FastMAHandle = iMA(_Symbol, _Period, FastMA_Period, 0, MODE_EMA, PRICE_CLOSE);
+   SlowMAHandle = iMA(_Symbol, _Period, SlowMA_Period, 0, MODE_EMA, PRICE_CLOSE);
+   RSIHandle = iRSI(_Symbol, _Period, RSI_Period, PRICE_CLOSE);
+   MACDHandle = iMACD(_Symbol, _Period, MACD_Fast, MACD_Slow, MACD_Signal, PRICE_CLOSE);
+   ATRHandle = iATR(_Symbol, _Period, ATR_Period);
+   StochHandle = iStochastic(_Symbol, _Period, Stoch_K, Stoch_D, Stoch_Slowing, MODE_SMA, STO_LOWHIGH);
+   
+   //--- Check handles
+   if(FastMAHandle == INVALID_HANDLE || SlowMAHandle == INVALID_HANDLE || 
+      RSIHandle == INVALID_HANDLE || MACDHandle == INVALID_HANDLE ||
+      ATRHandle == INVALID_HANDLE || StochHandle == INVALID_HANDLE)
+   {
+      Print("Error creating indicator handles!");
+      return(INIT_FAILED);
+   }
+   
+   //--- Set indicator name
+   IndicatorSetString(INDICATOR_SHORTNAME, "Advanced Multi-Signal Forex");
+   
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+   if(rates_total < SlowMA_Period + 10) return(0);
+   
+   int start = MathMax(prev_calculated - 1, SlowMA_Period);
+   if(start < 0) start = 0;
+   
+   //--- Get indicator data
+   if(CopyBuffer(FastMAHandle, 0, 0, rates_total, FastMABuffer) <= 0) return(0);
+   if(CopyBuffer(SlowMAHandle, 0, 0, rates_total, SlowMABuffer) <= 0) return(0);
+   if(CopyBuffer(RSIHandle, 0, 0, rates_total, RSIBuffer) <= 0) return(0);
+   if(CopyBuffer(MACDHandle, 0, 0, rates_total, MACDBuffer) <= 0) return(0);
+   
+   double StochMain[], StochSignal[], ATRBuffer[];
+   ArrayResize(StochMain, rates_total);
+   ArrayResize(StochSignal, rates_total);
+   ArrayResize(ATRBuffer, rates_total);
+   
+   if(CopyBuffer(StochHandle, 0, 0, rates_total, StochMain) <= 0) return(0);
+   if(CopyBuffer(StochHandle, 1, 0, rates_total, StochSignal) <= 0) return(0);
+   if(CopyBuffer(ATRHandle, 0, 0, rates_total, ATRBuffer) <= 0) return(0);
+   
+   //--- Set arrays as series
+   ArraySetAsSeries(FastMABuffer, true);
+   ArraySetAsSeries(SlowMABuffer, true);
+   ArraySetAsSeries(RSIBuffer, true);
+   ArraySetAsSeries(MACDBuffer, true);
+   ArraySetAsSeries(StochMain, true);
+   ArraySetAsSeries(StochSignal, true);
+   ArraySetAsSeries(ATRBuffer, true);
+   ArraySetAsSeries(high, true);
+   ArraySetAsSeries(low, true);
+   ArraySetAsSeries(close, true);
+   ArraySetAsSeries(time, true);
+   
+   //--- Calculate Support and Resistance levels
+   if(Show_SR_Lines)
+   {
+      CalculateSupportResistance(high, low, rates_total);
+   }
+   
+   //--- Main calculation loop
+   for(int i = start; i < rates_total - 1; i++)
+   {
+      int pos = rates_total - 1 - i;
+      
+      //--- Initialize signal buffers
+      BuySignalBuffer[pos] = EMPTY_VALUE;
+      SellSignalBuffer[pos] = EMPTY_VALUE;
+      
+      //--- Skip if not enough data
+      if(pos < SlowMA_Period) continue;
+      
+      //--- Count buy/sell signals
+      int BuySignals = 0, SellSignals = 0;
+      
+      //--- 1. Moving Average Crossover Signal
+      if(FastMABuffer[pos] > SlowMABuffer[pos] && FastMABuffer[pos+1] <= SlowMABuffer[pos+1])
+         BuySignals++;
+      if(FastMABuffer[pos] < SlowMABuffer[pos] && FastMABuffer[pos+1] >= SlowMABuffer[pos+1])
+         SellSignals++;
+      
+      //--- 2. RSI Signal
+      if(RSIBuffer[pos] > RSI_Oversold && RSIBuffer[pos+1] <= RSI_Oversold)
+         BuySignals++;
+      if(RSIBuffer[pos] < RSI_Overbought && RSIBuffer[pos+1] >= RSI_Overbought)
+         SellSignals++;
+      
+      //--- 3. MACD Signal
+      if(MACDBuffer[pos] > 0 && MACDBuffer[pos+1] <= 0)
+         BuySignals++;
+      if(MACDBuffer[pos] < 0 && MACDBuffer[pos+1] >= 0)
+         SellSignals++;
+      
+      //--- 4. Stochastic Signal
+      if(StochMain[pos] > 20 && StochMain[pos+1] <= 20 && StochMain[pos] > StochSignal[pos])
+         BuySignals++;
+      if(StochMain[pos] < 80 && StochMain[pos+1] >= 80 && StochMain[pos] < StochSignal[pos])
+         SellSignals++;
+      
+      //--- 5. Price Action Signal (Engulfing patterns)
+      if(IsBullishEngulfing(i, rates_total, high, low, close))
+         BuySignals++;
+      if(IsBearishEngulfing(i, rates_total, high, low, close))
+         SellSignals++;
+      
+      //--- Generate signals based on strength requirement
+      if(BuySignals >= Signal_Strength)
+      {
+         BuySignalBuffer[pos] = low[pos] - ATRBuffer[pos] * 0.5;
+         if(Show_Alerts && i == 0 && time[pos] != LastAlertTime)
+         {
+            Alert("BUY Signal on ", _Symbol, " at ", TimeToString(time[pos]));
+            LastAlertTime = time[pos];
+         }
+      }
+      
+      if(SellSignals >= Signal_Strength)
+      {
+         SellSignalBuffer[pos] = high[pos] + ATRBuffer[pos] * 0.5;
+         if(Show_Alerts && i == 0 && time[pos] != LastAlertTime)
+         {
+            Alert("SELL Signal on ", _Symbol, " at ", TimeToString(time[pos]));
+            LastAlertTime = time[pos];
+         }
+      }
+   }
+   
+   return(rates_total);
+}
+
+//+------------------------------------------------------------------+
+//| Calculate Support and Resistance Levels                         |
+//+------------------------------------------------------------------+
+void CalculateSupportResistance(const double &high[], const double &low[], int rates_total)
+{
+   double support_level = 0, resistance_level = 0;
+   double highest = 0, lowest = 999999;
+   
+   //--- Find highest and lowest in lookback period
+   for(int i = 0; i < MathMin(Lookback_Bars, rates_total); i++)
+   {
+      if(high[i] > highest) highest = high[i];
+      if(low[i] < lowest) lowest = low[i];
+   }
+   
+   //--- Set support and resistance levels
+   support_level = lowest;
+   resistance_level = highest;
+   
+   //--- Fill support and resistance buffers
+   for(int i = 0; i < rates_total; i++)
+   {
+      SupportBuffer[i] = support_level;
+      ResistanceBuffer[i] = resistance_level;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check for Bullish Engulfing Pattern                            |
+//+------------------------------------------------------------------+
+bool IsBullishEngulfing(int shift, int rates_total, const double &high[], const double &low[], const double &close[])
+{
+   int pos = rates_total - 1 - shift;
+   if(pos < 1) return false;
+   
+   double open_curr = iOpen(_Symbol, _Period, shift);
+   double open_prev = iOpen(_Symbol, _Period, shift + 1);
+   
+   //--- Current candle is bullish and previous was bearish
+   if(close[pos] > open_curr && close[pos+1] < open_prev)
+   {
+      //--- Current candle engulfs previous candle
+      if(open_curr < close[pos+1] && close[pos] > open_prev)
+         return true;
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Check for Bearish Engulfing Pattern                            |
+//+------------------------------------------------------------------+
+bool IsBearishEngulfing(int shift, int rates_total, const double &high[], const double &low[], const double &close[])
+{
+   int pos = rates_total - 1 - shift;
+   if(pos < 1) return false;
+   
+   double open_curr = iOpen(_Symbol, _Period, shift);
+   double open_prev = iOpen(_Symbol, _Period, shift + 1);
+   
+   //--- Current candle is bearish and previous was bullish
+   if(close[pos] < open_curr && close[pos+1] > open_prev)
+   {
+      //--- Current candle engulfs previous candle
+      if(open_curr > close[pos+1] && close[pos] < open_prev)
+         return true;
+   }
+   
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator deinitialization function                      |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   //--- Release indicator handles
+   if(FastMAHandle != INVALID_HANDLE) IndicatorRelease(FastMAHandle);
+   if(SlowMAHandle != INVALID_HANDLE) IndicatorRelease(SlowMAHandle);
+   if(RSIHandle != INVALID_HANDLE) IndicatorRelease(RSIHandle);
+   if(MACDHandle != INVALID_HANDLE) IndicatorRelease(MACDHandle);
+   if(ATRHandle != INVALID_HANDLE) IndicatorRelease(ATRHandle);
+   if(StochHandle != INVALID_HANDLE) IndicatorRelease(StochHandle);
+}
