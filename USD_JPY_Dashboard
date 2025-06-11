@@ -1,0 +1,409 @@
+//+------------------------------------------------------------------+
+//|                                           USD_JPY_Dashboard.mq5 |
+//|                                  Copyright 2025, Your Name Here |
+//|                                             https://www.mql5.com |
+//+------------------------------------------------------------------+
+#property copyright "Copyright 2025, Your Name Here"
+#property link      "https://www.mql5.com"
+#property version   "1.00"
+#property indicator_chart_window
+#property indicator_buffers 10
+#property indicator_plots   7
+
+// Input parameters
+input int RSI_Period = 14;                    // RSI Period
+input ENUM_APPLIED_PRICE RSI_Price = PRICE_CLOSE; // RSI Applied Price
+input int StochRSI_Period = 14;               // Stochastic RSI Period
+input int StochRSI_K_Period = 3;              // Stochastic RSI %K Period
+input int StochRSI_D_Period = 3;              // Stochastic RSI %D Period
+input ENUM_MA_METHOD StochRSI_MA_Method = MODE_SMA; // Stochastic RSI MA Method
+input bool Show_Pivot_Points = true;          // Show Pivot Points
+input bool Show_Signals = true;               // Show Buy/Sell Arrows
+input double RSI_Oversold = 30;               // RSI Oversold Level
+input double RSI_Overbought = 70;             // RSI Overbought Level
+input double StochRSI_Oversold = 20;          // StochRSI Oversold Level
+input double StochRSI_Overbought = 80;        // StochRSI Overbought Level
+input color RSI_Color = clrYellow;            // RSI Color
+input color StochRSI_K_Color = clrLime;       // Stochastic RSI %K Color
+input color StochRSI_D_Color = clrRed;        // Stochastic RSI %D Color
+input color Pivot_Color = clrWhite;           // Pivot Points Color
+input color Support_Color = clrGreen;         // Support Levels Color
+input color Resistance_Color = clrRed;        // Resistance Levels Color
+input color Buy_Arrow_Color = clrLime;        // Buy Arrow Color
+input color Sell_Arrow_Color = clrRed;        // Sell Arrow Color
+
+// Indicator buffers
+double RSI_Buffer[];
+double StochRSI_K_Buffer[];
+double StochRSI_D_Buffer[];
+double Pivot_Buffer[];
+double Support_Resistance_Buffer[];
+double Buy_Arrow_Buffer[];
+double Sell_Arrow_Buffer[];
+
+// Additional buffers for calculations
+double RSI_Temp[];
+double StochRSI_Temp[];
+double High_Buffer[];
+
+// Handles for built-in indicators
+int RSI_Handle;
+
+//+------------------------------------------------------------------+
+//| Custom indicator initialization function                         |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    // Set indicator buffers
+    SetIndexBuffer(0, RSI_Buffer, INDICATOR_CALCULATIONS);
+    SetIndexBuffer(1, StochRSI_K_Buffer, INDICATOR_CALCULATIONS);
+    SetIndexBuffer(2, StochRSI_D_Buffer, INDICATOR_CALCULATIONS);
+    SetIndexBuffer(3, Pivot_Buffer, INDICATOR_DATA);
+    SetIndexBuffer(4, Support_Resistance_Buffer, INDICATOR_DATA);
+    SetIndexBuffer(5, Buy_Arrow_Buffer, INDICATOR_DATA);
+    SetIndexBuffer(6, Sell_Arrow_Buffer, INDICATOR_DATA);
+    SetIndexBuffer(7, RSI_Temp, INDICATOR_CALCULATIONS);
+    SetIndexBuffer(8, StochRSI_Temp, INDICATOR_CALCULATIONS);
+    SetIndexBuffer(9, High_Buffer, INDICATOR_CALCULATIONS);
+    
+    // Set plot properties for pivot points
+    PlotIndexSetInteger(3, PLOT_DRAW_TYPE, DRAW_LINE);
+    PlotIndexSetInteger(3, PLOT_LINE_COLOR, Pivot_Color);
+    PlotIndexSetInteger(3, PLOT_LINE_WIDTH, 2);
+    PlotIndexSetString(3, PLOT_LABEL, "Pivot");
+    
+    // Set plot properties for support/resistance
+    PlotIndexSetInteger(4, PLOT_DRAW_TYPE, DRAW_LINE);
+    PlotIndexSetInteger(4, PLOT_LINE_COLOR, Support_Color);
+    PlotIndexSetInteger(4, PLOT_LINE_WIDTH, 1);
+    PlotIndexSetString(4, PLOT_LABEL, "S/R Levels");
+    
+    // Set plot properties for buy arrows
+    PlotIndexSetInteger(5, PLOT_DRAW_TYPE, DRAW_ARROW);
+    PlotIndexSetInteger(5, PLOT_LINE_COLOR, Buy_Arrow_Color);
+    PlotIndexSetInteger(5, PLOT_LINE_WIDTH, 3);
+    PlotIndexSetInteger(5, PLOT_ARROW, 233); // Up arrow
+    PlotIndexSetString(5, PLOT_LABEL, "Buy Signal");
+    
+    // Set plot properties for sell arrows
+    PlotIndexSetInteger(6, PLOT_DRAW_TYPE, DRAW_ARROW);
+    PlotIndexSetInteger(6, PLOT_LINE_COLOR, Sell_Arrow_Color);
+    PlotIndexSetInteger(6, PLOT_LINE_WIDTH, 3);
+    PlotIndexSetInteger(6, PLOT_ARROW, 234); // Down arrow
+    PlotIndexSetString(6, PLOT_LABEL, "Sell Signal");
+    
+    // Initialize RSI handle
+    RSI_Handle = iRSI(_Symbol, _Period, RSI_Period, RSI_Price);
+    if(RSI_Handle == INVALID_HANDLE)
+    {
+        Print("Failed to create RSI handle");
+        return INIT_FAILED;
+    }
+    
+    // Set indicator properties
+    IndicatorSetString(INDICATOR_SHORTNAME, "USD/JPY Dashboard");
+    IndicatorSetInteger(INDICATOR_DIGITS, _Digits);
+    
+    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Custom indicator iteration function                              |
+//+------------------------------------------------------------------+
+int OnCalculate(const int rates_total,
+                const int prev_calculated,
+                const datetime &time[],
+                const double &open[],
+                const double &high[],
+                const double &low[],
+                const double &close[],
+                const long &tick_volume[],
+                const long &volume[],
+                const int &spread[])
+{
+    if(rates_total < RSI_Period + StochRSI_Period)
+        return 0;
+    
+    int calculated = BarsCalculated(RSI_Handle);
+    if(calculated < rates_total)
+    {
+        Print("Not enough data for RSI calculation");
+        return 0;
+    }
+    
+    int to_copy;
+    if(prev_calculated > rates_total || prev_calculated <= 0)
+        to_copy = rates_total;
+    else
+    {
+        to_copy = rates_total - prev_calculated;
+        if(prev_calculated > 0)
+            to_copy++;
+    }
+    
+    // Get RSI values
+    if(CopyBuffer(RSI_Handle, 0, 0, to_copy, RSI_Temp) <= 0)
+    {
+        Print("Failed to copy RSI data");
+        return 0;
+    }
+    
+    int start = prev_calculated - 1;
+    if(start < 0)
+        start = 0;
+    
+    // Calculate indicators
+    for(int i = start; i < rates_total; i++)
+    {
+        // RSI
+        if(i < RSI_Period)
+        {
+            RSI_Buffer[i] = EMPTY_VALUE;
+        }
+        else
+        {
+            RSI_Buffer[i] = RSI_Temp[i];
+        }
+        
+        // Stochastic RSI calculation
+        if(i >= RSI_Period + StochRSI_Period - 1)
+        {
+            double rsi_high = RSI_Temp[i];
+            double rsi_low = RSI_Temp[i];
+            
+            // Find highest and lowest RSI values in the period
+            for(int j = i - StochRSI_Period + 1; j <= i; j++)
+            {
+                if(RSI_Temp[j] > rsi_high)
+                    rsi_high = RSI_Temp[j];
+                if(RSI_Temp[j] < rsi_low)
+                    rsi_low = RSI_Temp[j];
+            }
+            
+            // Calculate Stochastic RSI
+            if(rsi_high != rsi_low)
+            {
+                StochRSI_Temp[i] = (RSI_Temp[i] - rsi_low) / (rsi_high - rsi_low) * 100.0;
+            }
+            else
+            {
+                StochRSI_Temp[i] = 0;
+            }
+        }
+        else
+        {
+            StochRSI_Temp[i] = EMPTY_VALUE;
+        }
+        
+        // Calculate %K (SMA of Stochastic RSI)
+        if(i >= RSI_Period + StochRSI_Period + StochRSI_K_Period - 2)
+        {
+            double sum = 0;
+            int count = 0;
+            for(int j = i - StochRSI_K_Period + 1; j <= i; j++)
+            {
+                if(StochRSI_Temp[j] != EMPTY_VALUE)
+                {
+                    sum += StochRSI_Temp[j];
+                    count++;
+                }
+            }
+            if(count > 0)
+                StochRSI_K_Buffer[i] = sum / count;
+            else
+                StochRSI_K_Buffer[i] = EMPTY_VALUE;
+        }
+        else
+        {
+            StochRSI_K_Buffer[i] = EMPTY_VALUE;
+        }
+        
+        // Calculate %D (SMA of %K)
+        if(i >= RSI_Period + StochRSI_Period + StochRSI_K_Period + StochRSI_D_Period - 3)
+        {
+            double sum = 0;
+            int count = 0;
+            for(int j = i - StochRSI_D_Period + 1; j <= i; j++)
+            {
+                if(StochRSI_K_Buffer[j] != EMPTY_VALUE)
+                {
+                    sum += StochRSI_K_Buffer[j];
+                    count++;
+                }
+            }
+            if(count > 0)
+                StochRSI_D_Buffer[i] = sum / count;
+            else
+                StochRSI_D_Buffer[i] = EMPTY_VALUE;
+        }
+        else
+        {
+            StochRSI_D_Buffer[i] = EMPTY_VALUE;
+        }
+        
+        // Calculate Pivot Points (simplified daily pivot)
+        if(Show_Pivot_Points && i > 0)
+        {
+            datetime current_time = time[i];
+            datetime prev_time = time[i-1];
+            
+            // Check if it's a new day
+            MqlDateTime dt_current, dt_prev;
+            TimeToStruct(current_time, dt_current);
+            TimeToStruct(prev_time, dt_prev);
+            
+            if(dt_current.day != dt_prev.day || i == rates_total - 1)
+            {
+                // Calculate pivot for previous day
+                double day_high = high[i-1];
+                double day_low = low[i-1];
+                double day_close = close[i-1];
+                
+                // Find the actual day's high and low
+                for(int k = i-1; k >= 0; k--)
+                {
+                    MqlDateTime dt_k;
+                    TimeToStruct(time[k], dt_k);
+                    if(dt_k.day != dt_prev.day)
+                        break;
+                    
+                    if(high[k] > day_high)
+                        day_high = high[k];
+                    if(low[k] < day_low)
+                        day_low = low[k];
+                }
+                
+                double pivot = (day_high + day_low + day_close) / 3.0;
+                Pivot_Buffer[i] = pivot;
+                
+                // Support and Resistance levels
+                double s1 = 2 * pivot - day_high;
+                double r1 = 2 * pivot - day_low;
+                Support_Resistance_Buffer[i] = s1;
+            }
+            else
+            {
+                Pivot_Buffer[i] = Pivot_Buffer[i-1];
+                Support_Resistance_Buffer[i] = Support_Resistance_Buffer[i-1];
+            }
+        }
+        else
+        {
+            Pivot_Buffer[i] = EMPTY_VALUE;
+            Support_Resistance_Buffer[i] = EMPTY_VALUE;
+        }
+        
+        // Generate Buy/Sell Signals
+        if(Show_Signals && i > 2)
+        {
+            Buy_Arrow_Buffer[i] = EMPTY_VALUE;
+            Sell_Arrow_Buffer[i] = EMPTY_VALUE;
+            
+            // Check for buy signal
+            bool buy_signal = false;
+            bool sell_signal = false;
+            
+            // Buy conditions:
+            // 1. RSI was oversold and now crossing above oversold level
+            // 2. StochRSI %K crossing above %D in oversold territory
+            // 3. Price above pivot point (if available)
+            if(RSI_Buffer[i] != EMPTY_VALUE && RSI_Buffer[i-1] != EMPTY_VALUE &&
+               StochRSI_K_Buffer[i] != EMPTY_VALUE && StochRSI_D_Buffer[i] != EMPTY_VALUE &&
+               StochRSI_K_Buffer[i-1] != EMPTY_VALUE && StochRSI_D_Buffer[i-1] != EMPTY_VALUE)
+            {
+                // RSI oversold recovery
+                bool rsi_buy = (RSI_Buffer[i-1] <= RSI_Oversold && RSI_Buffer[i] > RSI_Oversold);
+                
+                // StochRSI bullish crossover in oversold area
+                bool stoch_buy = (StochRSI_K_Buffer[i-1] <= StochRSI_D_Buffer[i-1] && 
+                                 StochRSI_K_Buffer[i] > StochRSI_D_Buffer[i] && 
+                                 StochRSI_K_Buffer[i] < StochRSI_Overbought);
+                
+                // Combined RSI and StochRSI oversold recovery
+                bool combined_buy = (RSI_Buffer[i] > RSI_Oversold && RSI_Buffer[i-1] <= RSI_Oversold) ||
+                                   (StochRSI_K_Buffer[i] > StochRSI_Oversold && StochRSI_K_Buffer[i-1] <= StochRSI_Oversold);
+                
+                buy_signal = rsi_buy || stoch_buy || combined_buy;
+                
+                // Sell conditions:
+                // 1. RSI was overbought and now crossing below overbought level  
+                // 2. StochRSI %K crossing below %D in overbought territory
+                // 3. Price below pivot point (if available)
+                
+                // RSI overbought decline
+                bool rsi_sell = (RSI_Buffer[i-1] >= RSI_Overbought && RSI_Buffer[i] < RSI_Overbought);
+                
+                // StochRSI bearish crossover in overbought area
+                bool stoch_sell = (StochRSI_K_Buffer[i-1] >= StochRSI_D_Buffer[i-1] && 
+                                  StochRSI_K_Buffer[i] < StochRSI_D_Buffer[i] && 
+                                  StochRSI_K_Buffer[i] > StochRSI_Oversold);
+                
+                // Combined RSI and StochRSI overbought decline
+                bool combined_sell = (RSI_Buffer[i] < RSI_Overbought && RSI_Buffer[i-1] >= RSI_Overbought) ||
+                                    (StochRSI_K_Buffer[i] < StochRSI_Overbought && StochRSI_K_Buffer[i-1] >= StochRSI_Overbought);
+                
+                sell_signal = rsi_sell || stoch_sell || combined_sell;
+            }
+            
+            // Set arrow signals - position them relative to the current price
+            if(buy_signal && !sell_signal)
+            {
+                Buy_Arrow_Buffer[i] = low[i] - (high[i] - low[i]) * 0.2; // Below the low
+            }
+            
+            if(sell_signal && !buy_signal)
+            {
+                Sell_Arrow_Buffer[i] = high[i] + (high[i] - low[i]) * 0.2; // Above the high
+            }
+        }
+        else
+        {
+            Buy_Arrow_Buffer[i] = EMPTY_VALUE;
+            Sell_Arrow_Buffer[i] = EMPTY_VALUE;
+        }
+    }
+    
+    return rates_total;
+}
+
+//+------------------------------------------------------------------+
+//| Deinitialization function                                        |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    if(RSI_Handle != INVALID_HANDLE)
+        IndicatorRelease(RSI_Handle);
+}
+
+//+------------------------------------------------------------------+
+//| Custom function to display information on chart                  |
+//+------------------------------------------------------------------+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+{
+    if(id == CHARTEVENT_CHART_CHANGE)
+    {
+        // Update chart information
+        int last_bar = Bars(_Symbol, _Period) - 1;
+        string signal_info = "";
+        
+        if(Buy_Arrow_Buffer[last_bar] != EMPTY_VALUE)
+            signal_info = "🟢 BUY SIGNAL ACTIVE";
+        else if(Sell_Arrow_Buffer[last_bar] != EMPTY_VALUE)
+            signal_info = "🔴 SELL SIGNAL ACTIVE";
+        else
+            signal_info = "⚪ No Active Signal";
+            
+        Comment("USD/JPY Multi-Indicator Dashboard\n",
+                "=====================================\n",
+                signal_info, "\n",
+                "=====================================\n",
+                "RSI Period: ", RSI_Period, "\n",
+                "StochRSI Period: ", StochRSI_Period, "\n",
+                "Current RSI: ", DoubleToString(RSI_Buffer[last_bar], 2), "\n",
+                "Current StochRSI %K: ", DoubleToString(StochRSI_K_Buffer[last_bar], 2), "\n",
+                "Current StochRSI %D: ", DoubleToString(StochRSI_D_Buffer[last_bar], 2), "\n",
+                "=====================================\n",
+                "Oversold Levels: RSI<", RSI_Oversold, " | StochRSI<", StochRSI_Oversold, "\n",
+                "Overbought Levels: RSI>", RSI_Overbought, " | StochRSI>", StochRSI_Overbought);
+    }
+}
